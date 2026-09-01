@@ -442,9 +442,3 @@ it does not return the whole table in one response.
   against what was just persisted) — correct for the common case, but two
   entities in the same region with byte-identical raw text could have a
   flag attributed to the wrong one of the pair.
-- `extraction/entities.py`'s OCR-digit-confusion tolerance (`l`/`I` -> `1`,
-  etc.) only applies to the *year* in a date match, not the day or month —
-  found via `eval/report.py` against the `ledger_shillings` fixture, where
-  Tesseract misread "1st" as "ist" and the date entity was silently missed
-  entirely rather than recovered. Worth widening to the day/month capture
-  groups if real archive OCR shows this pattern often.

@@ -23,6 +23,9 @@ DATE_CASES = [
     ("the 1st of January, 1900", "1900-01-01"),
     ("the 3rd day of Morch, l897", "1897-03-03"),  # fuzzy month + OCR-mangled year
     ("Sept 9, 1888", "1888-09-09"),
+    ("the ist of January, 1850", "1850-01-01"),  # OCR-mangled day ("1st" -> "ist")
+    ("the 3lst of December, 1901", "1901-12-31"),  # OCR-mangled two-digit day ("31st" -> "3lst")
+    ("O3/15/1923", "1923-03-15"),  # OCR-mangled numeric month ("03" -> "O3")
 ]
 
 
@@ -36,6 +39,16 @@ class TestDateExtraction:
     def test_ocr_mangled_year_lowers_confidence(self):
         clean = _only("3 March 1897", "date")[0]
         mangled = _only("3 March l897", "date")[0]
+        assert mangled.confidence < clean.confidence
+
+    def test_ocr_mangled_day_lowers_confidence(self):
+        clean = _only("the 1st of January, 1850", "date")[0]
+        mangled = _only("the ist of January, 1850", "date")[0]
+        assert mangled.confidence < clean.confidence
+
+    def test_ocr_mangled_numeric_month_lowers_confidence(self):
+        clean = _only("03/15/1923", "date")[0]
+        mangled = _only("O3/15/1923", "date")[0]
         assert mangled.confidence < clean.confidence
 
     def test_fuzzy_month_correction_lowers_confidence(self):

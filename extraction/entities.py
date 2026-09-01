@@ -91,10 +91,16 @@ _ORDINAL_SUFFIX = r"(?:st|nd|rd|th)?"
 # example: "l8" for "18"). Restricted to this class, so the fuzzy
 # normalization below only ever touches genuinely digit-shaped substrings.
 _YEAR_CLASS = r"[0-9lIOSZBgqi|]{3,4}"
+# Same tolerance, sized for a 1-2 digit day or numeric month rather than a
+# 3-4 digit year (e.g. "1st" OCR'd as "ist" -> day="i" here, then the
+# ordinal suffix "st" still matches right after; none of the OCR-confusable
+# letters overlap with the ordinal suffixes' own letters, so this doesn't
+# make day/ordinal parsing ambiguous).
+_DAY_MONTH_DIGIT_CLASS = r"[0-9lIOSZBgqi|]{1,2}"
 
 _DAY_MONTH_YEAR_RE = re.compile(
     rf"""\b(?:the\s+)?
-    (?P<day>\d{{1,2}}){_ORDINAL_SUFFIX}
+    (?P<day>{_DAY_MONTH_DIGIT_CLASS}){_ORDINAL_SUFFIX}
     \s+(?:(?:day\s+)?of\s+)?
     (?P<month>[A-Za-z]{{3,9}})\.?,?\s+
     (?P<year>{_YEAR_CLASS})\b""",
@@ -102,12 +108,12 @@ _DAY_MONTH_YEAR_RE = re.compile(
 )
 _MONTH_DAY_YEAR_RE = re.compile(
     rf"""\b(?P<month>[A-Za-z]{{3,9}})\.?\s+
-    (?P<day>\d{{1,2}}){_ORDINAL_SUFFIX},?\s+
+    (?P<day>{_DAY_MONTH_DIGIT_CLASS}){_ORDINAL_SUFFIX},?\s+
     (?P<year>{_YEAR_CLASS})\b""",
     re.VERBOSE | re.IGNORECASE,
 )
 _NUMERIC_DATE_RE = re.compile(
-    rf"\b(?P<month>\d{{1,2}})[/-](?P<day>\d{{1,2}})[/-](?P<year>{_YEAR_CLASS})\b"
+    rf"\b(?P<month>{_DAY_MONTH_DIGIT_CLASS})[/-](?P<day>{_DAY_MONTH_DIGIT_CLASS})[/-](?P<year>{_YEAR_CLASS})\b"
 )
 
 
@@ -132,7 +138,10 @@ def _parse_word_date_match(m: re.Match) -> dict | None:
     month_num, month_exact = _resolve_month(m.group("month").rstrip("."))
     if month_num is None:
         return None
-    day = int(m.group("day"))
+    day_digits, day_was_ocr_corrected = _normalize_ocr_digit_run(m.group("day"))
+    if not day_digits.isdigit():
+        return None
+    day = int(day_digits)
     year_digits, year_was_ocr_corrected = _normalize_ocr_digit_run(m.group("year"))
     if not year_digits.isdigit():
         return None
@@ -148,11 +157,17 @@ def _parse_word_date_match(m: re.Match) -> dict | None:
         confidence -= 0.15
     if year_was_ocr_corrected:
         confidence -= 0.15
+    if day_was_ocr_corrected:
+        confidence -= 0.15
     return {"iso": iso, "confidence": max(confidence, 0.4)}
 
 
 def _parse_numeric_date_match(m: re.Match) -> dict | None:
-    month, day = int(m.group("month")), int(m.group("day"))
+    month_digits, month_was_ocr_corrected = _normalize_ocr_digit_run(m.group("month"))
+    day_digits, day_was_ocr_corrected = _normalize_ocr_digit_run(m.group("day"))
+    if not month_digits.isdigit() or not day_digits.isdigit():
+        return None
+    month, day = int(month_digits), int(day_digits)
     year_digits, year_was_ocr_corrected = _normalize_ocr_digit_run(m.group("year"))
     if not year_digits.isdigit():
         return None
@@ -163,7 +178,8 @@ def _parse_numeric_date_match(m: re.Match) -> dict | None:
         iso = date(year, month, day).isoformat()
     except ValueError:
         return None
-    return {"iso": iso, "confidence": 0.7 if year_was_ocr_corrected else 0.85}
+    any_ocr_corrected = year_was_ocr_corrected or month_was_ocr_corrected or day_was_ocr_corrected
+    return {"iso": iso, "confidence": 0.7 if any_ocr_corrected else 0.85}
 
 
 @Language.component("historical_date_ruler")
