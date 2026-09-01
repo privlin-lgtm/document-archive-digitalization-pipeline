@@ -31,18 +31,27 @@ search, and surfaces low-confidence results for human review.
    carries a normalized value, raw text, a confidence blending the
    extraction method with OCR confidence, and an optional source region
    bbox.
-5. **Index** (`storage/`) — OCR text and entities are persisted to Postgres,
-   with a full-text search index for querying the archive.
+5. **Index** (`storage/models.py`, `storage/queries.py`) — `documents` fans
+   out to `pages` → `regions` → (`ocr_results`, `entities`), plus
+   `review_flags`. `pages.full_text_search` is a stored generated tsvector
+   column with a GIN index for full-text search (ranked via `ts_rank`,
+   highlighted via `ts_headline`). `entities.date_value` uses a BRIN index
+   instead of B-tree; `entities.raw_text`/`normalized_value` have pg_trgm
+   GIN indexes for fuzzy "did you mean" search. `queries.py` has the
+   example queries as parameterized functions, with a real EXPLAIN ANALYZE
+   walkthrough (not a hypothetical one) of the BRIN/B-tree tradeoff in its
+   module docstring.
 6. **Review** (`review_api/`, `web/`) — documents with low OCR/extraction
    confidence or detected anomalies are queued for a human reviewer via the
    annotation UI.
 
-This scaffold wires up stages 1, 2, 3, 4, and 6: upload → stored row → API
-is end-to-end, and preprocessing/layout/OCR/extraction are implemented and
-tested. Search indexing (stage 5) is still a stub; region and entity
-metadata are structured to be persisted once the `regions`/`entities`
-tables land in stage 5, so the annotation UI can highlight "this date came
-from this box on the page."
+This scaffold wires up stages 1-6: upload → stored row → API is
+end-to-end, and preprocessing/layout/OCR/extraction/schema are implemented
+and tested. The `regions`/`entities` tables are in place so the annotation
+UI can highlight "this date came from this box on the page" — actually
+*writing* extraction output into them (i.e. wiring ingestion → OCR →
+extraction → these tables end-to-end as a pipeline) and the anomaly-flagging
+logic that populates `review_flags` (stage 6) are the remaining pieces.
 
 ### Trying the OCR engine
 
@@ -80,17 +89,48 @@ uv sync --extra ner-transformer
 NER_MODEL=en_core_web_trf
 ```
 
+### Trying the schema & example queries
+
+```bash
+docker compose up -d db
+docker compose exec app uv run alembic upgrade head
+docker compose exec -T db psql -U postgres -d document_archive -f - < scripts/seed_synthetic_data.sql
+```
+
+Seeds ~240k synthetic entities (in ~10s, via `generate_series` bulk SQL —
+not an ORM loop) plus two hand-crafted documents with realistic
+cross-referenced person/date/location/amount entities, for exercising
+`storage/queries.py`'s example queries:
+
+```bash
+docker compose exec app uv run python -c "
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from storage import queries
+
+engine = create_engine('postgresql+psycopg://postgres:postgres@db:5432/document_archive')
+session = sessionmaker(bind=engine)()
+for r in queries.full_text_search(session, 'John Smith Bombay'):
+    print(r)
+"
+```
+
+`tests/test_queries.py` runs against this seeded data when a live Postgres
+is reachable (skipped otherwise, e.g. plain `uv run pytest` on the host —
+the `db` service doesn't publish a host port, see Configuration below).
+
 ## Project layout
 
 ```
 ingestion/     upload handling, storage backend writes
 ocr/           OCR engine abstraction (multi-backend)
 extraction/    structured entity extraction from OCR text
-storage/       SQLAlchemy models, DB session, full-text index
+storage/       SQLAlchemy models, DB session, full-text/BRIN/trigram search queries
 review_api/    FastAPI app: health check, review/document endpoints
 web/           annotation UI (served by review_api)
 tests/         pytest suite
 alembic/       DB migrations
+scripts/       synthetic data seeding for exercising the schema at scale
 config.py      pydantic-settings config, read from .env
 worker.py      Celery app + task definitions for async OCR jobs
 ```

@@ -6,7 +6,7 @@ from sqlalchemy.pool import StaticPool
 
 from config import get_settings
 from review_api.main import app
-from storage.db import Base, get_db
+from storage.db import get_db
 from storage.models import Document, DocumentStatus
 
 
@@ -14,12 +14,17 @@ from storage.models import Document, DocumentStatus
 def api():
     """A TestClient wired to an isolated in-memory SQLite DB, so these tests
     don't need a live Postgres instance.
+
+    Only creates the `documents` table (not the full Base.metadata) — later
+    tables (pages.full_text_search in particular) use genuinely
+    Postgres-only column types (TSVECTOR, a STORED generated column) that
+    SQLite can't compile; this router only touches `documents` anyway.
     """
     engine = create_engine(
         "sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool
     )
     TestSession = sessionmaker(bind=engine)
-    Base.metadata.create_all(engine)
+    Document.__table__.create(engine)
 
     def override_get_db():
         db = TestSession()

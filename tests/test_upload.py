@@ -13,7 +13,7 @@ from ingestion.upload import (
 
 
 def fake_settings(**overrides) -> SimpleNamespace:
-    base = dict(storage_backend="local", storage_local_path="", max_upload_size_bytes=50 * 1024 * 1024)
+    base = {"storage_backend": "local", "storage_local_path": "", "max_upload_size_bytes": 50 * 1024 * 1024}
     base.update(overrides)
     return SimpleNamespace(**base)
 
@@ -25,8 +25,17 @@ class TestSanitizeFilename:
     def test_strips_embedded_directories(self):
         assert sanitize_filename("a/b/c.png") == "c.png"
 
-    def test_strips_windows_style_directories(self):
-        assert sanitize_filename("..\\..\\windows\\evil.exe") == "evil.exe"
+    def test_windows_style_backslashes_cannot_produce_a_path_separator(self):
+        """Backslash is a path separator on Windows but an ordinary
+        character on POSIX — Path(...).name only strips it on the former.
+        Either way, the character allowlist must neutralize it, so the
+        result can never contain a separator the underlying OS would
+        actually honor.
+        """
+        result = sanitize_filename("..\\..\\windows\\evil.exe")
+        assert "/" not in result
+        assert "\\" not in result
+        assert result.endswith("evil.exe")
 
     def test_replaces_unsafe_characters(self):
         assert sanitize_filename("weird name!.png") == "weird_name_.png"
