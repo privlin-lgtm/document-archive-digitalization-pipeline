@@ -87,16 +87,46 @@ tuned interaction design (per the project's own tool-choice notes, this
 stage split component structure/API client/routing from interactive
 polish).
 
-This scaffold wires up stages 1-8: upload → stored row → full review/search
-API → annotation UI is end-to-end, and preprocessing/layout/OCR/extraction/
-schema/anomaly-detection are implemented and tested. The `regions`/
-`entities`/`review_flags` tables are in place and the API/UI can read/write
-them — but nothing yet *populates* them automatically from an upload
-(wiring ingestion → OCR → extraction → anomaly detection into one pipeline
-that runs when `run_ocr_job` fires) is stage 9's job. Until then, `POST
-/documents` creates the `documents` row and enqueues the job, but the job
-itself is still a stub — so freshly uploaded documents show up with no
-pages/regions/entities until stage 9 lands.
+This scaffold wires up stages 1-9 end-to-end: `POST /documents` saves the
+scan, creates the `documents` row, and enqueues `worker.run_ocr_job`; the
+Celery worker runs `pipeline.run.run_pipeline`, which drives every stage in
+order — preprocess → layout segmentation → OCR → entity extraction →
+anomaly flagging → index for search — and lands the document at a terminal
+status (`ready` or `needs_review`). The full review/search API and
+annotation UI read real, pipeline-populated data, not stubs.
+
+```mermaid
+flowchart TD
+    A["POST /documents  review_api"] -->|"save file, create Document row"| B[("documents<br/>status=uploaded")]
+    A -->|"run_ocr_job.delay"| Q[["Redis / Celery queue"]]
+    Q --> W["Celery worker<br/>worker.run_ocr_job"]
+    W --> P1["preprocess<br/>ocr/preprocess.py"]
+    P1 --> P2["layout segmentation<br/>ocr/layout.py"]
+    P2 -->|"persist"| DBR[("pages, regions")]
+    P2 --> P3["OCR per region<br/>ocr/engine.py"]
+    P3 -->|"persist; retry/backoff on failure"| DBO[("ocr_results")]
+    P3 --> P4["entity extraction<br/>extraction/entities.py"]
+    P4 -->|"persist"| DBE[("entities")]
+    P4 --> P5["index for search<br/>pages.full_text, auto-computed tsvector"]
+    P5 --> P6["anomaly flagging<br/>extraction/anomalies.py"]
+    P6 -->|"persist"| DBF[("review_flags")]
+    P6 --> S{"any flags?"}
+    S -->|"yes"| R1[("status=needs_review")]
+    S -->|"no"| R2[("status=ready")]
+    R1 --> API["review_api<br/>GET /documents, /review_flags, /search"]
+    R2 --> API
+    API --> UI["web/ annotation UI"]
+```
+
+Each stage checks persisted state before doing work (see `pipeline/run.py`'s
+module docstring), so a retry after a mid-pipeline crash resumes rather than
+redoing everything — the case this protects is OCR, the one genuinely
+expensive per-region call. `python -m ingestion.batch <dir>` bulk-ingests a
+folder of scans (optionally `--watch` to keep polling for new ones), for
+archives that arrive as hundreds of files at once rather than one upload at
+a time. `scripts/smoke_test.py` runs a handful of sample documents through
+the real pipeline end-to-end and asserts they reach a terminal status with
+entities/flags populated — see that file's docstring for how to run it.
 
 ### Trying the OCR engine
 
@@ -218,20 +248,52 @@ by these tests), except `/search`, which needs real `tsvector`/`pg_trgm`
 and is skipped gracefully without a live Postgres, same as
 `tests/test_queries.py`.
 
+### Trying the pipeline end-to-end
+
+```bash
+docker compose up -d --build
+docker compose exec app uv run alembic upgrade head
+TOKEN=$(grep REVIEW_API_TOKEN .env | cut -d= -f2)
+
+curl -H "Authorization: Bearer $TOKEN" -F "files=@scan.png" http://localhost:8000/documents
+# poll until status is `ready` or `needs_review`:
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/documents/<id>
+```
+
+For a folder of many scans at once:
+
+```bash
+docker compose exec app uv run python -m ingestion.batch /data/documents/incoming --concurrency 8
+```
+
+Or run the smoke test (a handful of generated sample scans through the real
+pipeline, asserting each reaches a terminal status with entities/flags
+populated):
+
+```bash
+docker compose run --rm app python scripts/smoke_test.py
+```
+
+`tests/test_pipeline.py` covers the pipeline's stage logic and resumability
+against the shared SQLite fixture (Tesseract mocked, same convention as
+`tests/test_ocr_engine.py`); `scripts/smoke_test.py` is the one place a real
+`tesseract` binary and real Postgres actually run together.
+
 ## Project layout
 
 ```
-ingestion/     upload handling, storage backend writes
+ingestion/     upload handling (upload.py) + batch/folder-watch CLI (batch.py)
 ocr/           OCR engine abstraction (multi-backend)
 extraction/    entity extraction (entities.py) + review-flagging (anomalies.py)
+pipeline/      orchestrates the above into one pipeline (run.py) -- see worker.py
 storage/       SQLAlchemy models, DB session, full-text/BRIN/trigram search queries
 review_api/    FastAPI app: health, documents, search, entities, review_flags, stats
 web/           annotation UI — React/TypeScript, standalone Vite app (see web/README.md)
 tests/         pytest suite (backend)
 alembic/       DB migrations
-scripts/       synthetic data seeding for exercising the schema at scale
+scripts/       synthetic data seeding (scale) + pipeline smoke test (correctness)
 config.py      pydantic-settings config, read from .env
-worker.py      Celery app + task definitions for async OCR jobs
+worker.py      Celery app + task definitions for async pipeline jobs
 ```
 
 ## Requirements
@@ -347,3 +409,21 @@ it does not return the whole table in one response.
   time rather than an autonomous agent. Everything is functionally wired
   and tested end-to-end against a live backend; the remaining work is feel,
   not plumbing.
+- `pipeline/run.py` works one page per document (`page_number=1`) —
+  nothing upstream splits a multi-page source (e.g. a multi-page TIFF/PDF)
+  into separate pages yet; each upload is treated as a single-page scan.
+- A region's OCR result reloaded from a prior pipeline run (i.e. the
+  pipeline resumed after a crash) has no persisted per-word confidences —
+  the schema only stores the aggregate — so `detect_low_ocr_confidence`'s
+  word-level variant only applies to a region OCR'd in the *current* run,
+  not a resumed one. The region-level checks (which only need the
+  aggregate) are unaffected.
+- `ingestion/batch.py --watch` polls the directory rather than using an
+  OS-level filesystem-event watcher (inotify/watchdog) — one less
+  dependency, and archive drop-offs aren't latency-sensitive; swap in an
+  event-based watcher if sub-second pickup ever matters.
+- Anomaly flags map back to a persisted `region_id`/`entity_id` on a
+  best-effort basis (matching the transient bbox/raw-text a flag carries
+  against what was just persisted) — correct for the common case, but two
+  entities in the same region with byte-identical raw text could have a
+  flag attributed to the wrong one of the pair.

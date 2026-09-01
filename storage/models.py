@@ -30,6 +30,7 @@ class DocumentStatus(str, enum.Enum):
     extracting = "extracting"
     indexed = "indexed"
     needs_review = "needs_review"
+    ready = "ready"
     error = "error"
 
 
