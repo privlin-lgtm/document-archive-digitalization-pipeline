@@ -13,9 +13,12 @@ search, and surfaces low-confidence results for human review.
    raw scan so OCR gets a cleaner input, especially for faded/aged paper. Also
    computes a sharpness/contrast quality score to flag likely-poor-OCR scans
    early.
-3. **OCR** (`ocr/engine.py`) — a router classifies each region as typed or
-   handwritten and dispatches to the matching backend (Tesseract for typed
-   text, a pluggable TrOCR/cloud backend for handwriting), falling back to
+3. **OCR** (`ocr/engine.py`, `ocr/layout.py`) — before text extraction,
+   `layout.py` segments the page into regions (paragraph, table, signature,
+   margin annotation, stamp) via connected-component blobs + geometry
+   heuristics, each with a bounding box and reading order. `engine.py` then
+   routes each region to the matching OCR backend — Tesseract for typed
+   text, a pluggable TrOCR/cloud backend for handwriting — falling back to
    the other backend if one fails or times out. Output is structured: full
    text, per-word bounding boxes, and document/line-level confidence.
 4. **Extract** (`extraction/`) — structured entities (names, dates, places,
@@ -27,8 +30,11 @@ search, and surfaces low-confidence results for human review.
    annotation UI.
 
 This scaffold wires up stages 1, 2, 3, and 6: upload → stored row → API is
-end-to-end, and OCR preprocessing/engine are implemented and tested. Entity
-extraction (stage 4) and search indexing (stage 5) are still stubs.
+end-to-end, and preprocessing/layout/OCR are implemented and tested. Entity
+extraction (stage 4) and search indexing (stage 5) are still stubs; region
+metadata from `layout.py` is structured to be persisted once the `regions`
+table lands in stage 5, so the annotation UI can highlight "this date came
+from this box on the page."
 
 ### Trying the OCR engine
 
