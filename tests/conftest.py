@@ -1,0 +1,124 @@
+"""Shared pytest fixtures.
+
+`sqlite_engine` builds a SQLite-backed schema mirroring storage/models.py
+closely enough for the ORM (documents/pages/regions/ocr_results/entities/
+entity_corrections/review_flags) to work against it — used by tests that
+don't need genuinely Postgres-only features (tsvector full-text search,
+BRIN, pg_trgm; those live in test_queries.py and test_review_api.py's
+search tests, gated on a real Postgres being reachable).
+
+Raw SQL rather than `Base.metadata.create_all()`, because two columns use
+Postgres-only types that don't exist in SQLite at all:
+`pages.full_text_search` (TSVECTOR + a `to_tsvector(...)` generated
+expression) and `ocr_results.notes` (ARRAY). Both are left as plain
+nullable TEXT here — fine for tests that don't exercise search or notes.
+"""
+
+import pytest
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+_SQLITE_SCHEMA = """
+CREATE TABLE documents (
+    id TEXT PRIMARY KEY,
+    filename TEXT NOT NULL,
+    upload_time DATETIME NOT NULL,
+    status TEXT NOT NULL,
+    raw_image_path TEXT NOT NULL
+);
+
+CREATE TABLE pages (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    page_number INTEGER NOT NULL,
+    full_text TEXT,
+    full_text_search TEXT,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(document_id, page_number)
+);
+
+CREATE TABLE regions (
+    id TEXT PRIMARY KEY,
+    page_id TEXT NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+    bbox_x INTEGER NOT NULL,
+    bbox_y INTEGER NOT NULL,
+    bbox_w INTEGER NOT NULL,
+    bbox_h INTEGER NOT NULL,
+    region_type TEXT NOT NULL,
+    reading_order INTEGER NOT NULL,
+    confidence REAL NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE ocr_results (
+    id TEXT PRIMARY KEY,
+    region_id TEXT NOT NULL UNIQUE REFERENCES regions(id) ON DELETE CASCADE,
+    engine TEXT NOT NULL,
+    text TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    status TEXT NOT NULL,
+    notes TEXT,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE entities (
+    id TEXT PRIMARY KEY,
+    region_id TEXT NOT NULL REFERENCES regions(id) ON DELETE CASCADE,
+    entity_type TEXT NOT NULL,
+    raw_text TEXT NOT NULL,
+    normalized_value TEXT,
+    confidence REAL NOT NULL,
+    start_char INTEGER NOT NULL,
+    end_char INTEGER NOT NULL,
+    date_value DATE,
+    amount_value NUMERIC,
+    amount_currency TEXT,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE entity_corrections (
+    id TEXT PRIMARY KEY,
+    entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    original_value TEXT,
+    corrected_value TEXT NOT NULL,
+    reviewer TEXT NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE review_flags (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    page_id TEXT REFERENCES pages(id) ON DELETE CASCADE,
+    region_id TEXT REFERENCES regions(id) ON DELETE CASCADE,
+    entity_id TEXT REFERENCES entities(id) ON DELETE CASCADE,
+    flag_type TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    explanation TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    status_changed_at DATETIME,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+
+@pytest.fixture()
+def sqlite_engine():
+    engine = create_engine(
+        "sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+
+    @event.listens_for(engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    with engine.begin() as conn:
+        for statement in _SQLITE_SCHEMA.strip().split(";\n\n"):
+            if statement.strip():
+                conn.exec_driver_sql(statement)
+    return engine
+
+
+@pytest.fixture()
+def sqlite_session_factory(sqlite_engine):
+    return sessionmaker(bind=sqlite_engine)

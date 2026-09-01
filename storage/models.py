@@ -191,6 +191,32 @@ class Entity(Base):
     review_flags: Mapped[list["ReviewFlag"]] = relationship(
         back_populates="entity", cascade="all, delete-orphan"
     )
+    corrections: Mapped[list["EntityCorrection"]] = relationship(
+        back_populates="entity", cascade="all, delete-orphan", order_by="EntityCorrection.created_at"
+    )
+
+
+class EntityCorrection(Base):
+    """A human correction of an entity's value (PATCH /entities/{id}).
+
+    `entity.normalized_value` is updated to the corrected value so
+    downstream queries/search see the current best value, but
+    `entity.raw_text` (the original OCR output) is never touched — and
+    every correction is appended here rather than overwriting a single
+    "corrected value" column, preserving a full audit trail of who changed
+    what, and from what, over time.
+    """
+
+    __tablename__ = "entity_corrections"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    entity_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("entities.id", ondelete="CASCADE"), nullable=False)
+    original_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    corrected_value: Mapped[str] = mapped_column(Text, nullable=False)
+    reviewer: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
+
+    entity: Mapped[Entity] = relationship(back_populates="corrections")
 
 
 class FlagSeverity(str, enum.Enum):

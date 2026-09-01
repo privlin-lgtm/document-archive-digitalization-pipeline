@@ -59,7 +59,7 @@ class TestAuth:
         client, _ = api
         response = client.get("/documents", headers=auth_headers())
         assert response.status_code == 200
-        assert response.json() == []
+        assert response.json()["results"] == []
 
     def test_get_document_without_token_is_rejected(self, api):
         client, _ = api
@@ -93,14 +93,14 @@ class TestPagination:
         response = client.get("/documents", params={"limit": 2}, headers=auth_headers())
 
         assert response.status_code == 200
-        assert len(response.json()) == 2
+        assert len(response.json()["results"]) == 2
 
     def test_offset_skips_earlier_rows(self, api):
         client, TestSession = api
         self._seed(TestSession, 5)
 
-        page1 = client.get("/documents", params={"limit": 2, "offset": 0}, headers=auth_headers()).json()
-        page2 = client.get("/documents", params={"limit": 2, "offset": 2}, headers=auth_headers()).json()
+        page1 = client.get("/documents", params={"limit": 2, "offset": 0}, headers=auth_headers()).json()["results"]
+        page2 = client.get("/documents", params={"limit": 2, "offset": 2}, headers=auth_headers()).json()["results"]
 
         assert {d["id"] for d in page1}.isdisjoint({d["id"] for d in page2})
 
@@ -116,4 +116,4 @@ class TestPagination:
         response = client.get("/documents", headers=auth_headers())
 
         assert response.status_code == 200
-        assert len(response.json()) == 5  # under the default limit, all rows returned
+        assert len(response.json()["results"]) == 5  # under the default limit, all rows returned

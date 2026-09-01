@@ -53,13 +53,36 @@ search, and surfaces low-confidence results for human review.
    onto `review_flags`, with a `status` (open/resolved/dismissed) for the
    review workflow.
 
-This scaffold wires up stages 1-6: upload → stored row → API is
-end-to-end, and preprocessing/layout/OCR/extraction/schema/anomaly-detection
-are implemented and tested. The `regions`/`entities`/`review_flags` tables
-are in place so the annotation UI can highlight "this date came from this
-box on the page" — actually *writing* pipeline output into them (wiring
-ingestion → OCR → extraction → anomaly detection → these tables end-to-end)
-is stage 9's job.
+The **review/search API** (`review_api/`) is what the annotation UI (stage 8)
+will consume:
+
+- `POST /documents` — upload a scan or batch; enqueues the async OCR job
+  (a broker hiccup logs loudly but doesn't fail the upload — the row is
+  the source of truth)
+- `GET /documents` — paginated list; `GET /documents/{id}` — full detail:
+  status, pages → regions → OCR text/entities, review flags
+- `GET /documents/{id}/image` — serves the scan, optionally
+  (`?annotate=true`) with region bounding boxes drawn on it, colored by
+  region type
+- `GET /search` — ranked full-text search with highlighted snippets,
+  filterable by date range, entity type, location (fuzzy), and minimum OCR
+  confidence
+- `PATCH /entities/{id}` — records a human correction (`entity_corrections`
+  keeps a full audit trail — original value, corrected value, reviewer,
+  timestamp — `raw_text`, the original OCR output, is never touched)
+- `PATCH /review_flags/{id}` — resolve or dismiss a flag
+- `GET /stats` — dashboard summary: documents processed, pending review,
+  average confidence, open flags by type
+
+This scaffold wires up stages 1-7: upload → stored row → full review/search
+API is end-to-end, and preprocessing/layout/OCR/extraction/schema/anomaly-
+detection are implemented and tested. The `regions`/`entities`/
+`review_flags` tables are in place and the API can read/write them — but
+nothing yet *populates* them automatically from an upload (wiring
+ingestion → OCR → extraction → anomaly detection into one pipeline that
+runs when `run_ocr_job` fires) is stage 9's job. Until then, `POST
+/documents` creates the `documents` row and enqueues the job, but the job
+itself is still a stub.
 
 ### Trying the OCR engine
 
@@ -148,14 +171,47 @@ Operates purely on the in-memory dataclasses from the OCR/extraction stages
 (no DB needed) — `detect_all_anomalies` runs every check for one document's
 regions/OCR results/entities at once.
 
+### Trying the review API
+
+```bash
+docker compose up -d
+docker compose exec app uv run alembic upgrade head
+TOKEN=$(grep REVIEW_API_TOKEN .env | cut -d= -f2)
+
+# upload
+curl -H "Authorization: Bearer $TOKEN" -F "files=@scan.png" http://localhost:8000/documents
+
+# full detail (status, pages/regions/entities, flags)
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/documents/<id>
+
+# annotated image (region boxes drawn on it)
+curl -H "Authorization: Bearer $TOKEN" "http://localhost:8000/documents/<id>/image?annotate=true" -o annotated.png
+
+# search
+curl -H "Authorization: Bearer $TOKEN" "http://localhost:8000/search?q=John+Smith&date_from=1890-01-01&date_to=1900-01-01"
+
+# dashboard
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/stats
+```
+
+Interactive OpenAPI docs are at `http://localhost:8000/docs` once the stack
+is up.
+
+`tests/test_review_api.py` covers every endpoint: most run against an
+in-memory SQLite schema (see `tests/conftest.py` — two Postgres-only column
+types are swapped for plain equivalents there, since neither is exercised
+by these tests), except `/search`, which needs real `tsvector`/`pg_trgm`
+and is skipped gracefully without a live Postgres, same as
+`tests/test_queries.py`.
+
 ## Project layout
 
 ```
 ingestion/     upload handling, storage backend writes
 ocr/           OCR engine abstraction (multi-backend)
-extraction/    structured entity extraction from OCR text
+extraction/    entity extraction (entities.py) + review-flagging (anomalies.py)
 storage/       SQLAlchemy models, DB session, full-text/BRIN/trigram search queries
-review_api/    FastAPI app: health check, review/document endpoints
+review_api/    FastAPI app: health, documents, search, entities, review_flags, stats
 web/           annotation UI (served by review_api)
 tests/         pytest suite
 alembic/       DB migrations

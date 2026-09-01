@@ -61,10 +61,10 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session, aliased
 
-from storage.models import Document, Entity, EntityType, Page, Region
+from storage.models import Document, Entity, EntityType, OCRResultRecord, Page, Region
 
 
 def full_text_search(session: Session, query_text: str, *, limit: int = 20) -> list[dict]:
@@ -213,3 +213,103 @@ def fuzzy_entity_search(
         .limit(limit)
     )
     return [dict(row) for row in session.execute(stmt).mappings().all()]
+
+
+def search_documents(
+    session: Session,
+    query_text: str,
+    *,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    entity_type: EntityType | None = None,
+    location: str | None = None,
+    min_confidence: float | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> tuple[list[dict], int]:
+    """Full-text search with the review_api GET /search filters layered on
+    top of `full_text_search`, each applied as an independent EXISTS
+    subquery so combining several is just AND-ing more predicates:
+
+    - date_from/date_to: page also has a 'date' entity with date_value in
+      this range.
+    - entity_type: page has at least one entity of this type.
+    - location: page has a 'location' entity fuzzy-matching (pg_trgm `%`)
+      this string.
+    - min_confidence: page has at least one region whose OCR confidence
+      (0-100) is at or above this.
+
+    Returns (results, total_count) for pagination.
+    """
+    tsquery = func.plainto_tsquery("english", query_text)
+    rank = func.ts_rank(Page.full_text_search, tsquery).label("rank")
+    snippet = func.ts_headline("english", Page.full_text, tsquery).label("snippet")
+
+    filters = [Page.full_text_search.op("@@")(tsquery)]
+
+    if date_from is not None or date_to is not None:
+        date_entity, date_region = aliased(Entity), aliased(Region)
+        conditions = [
+            date_region.id == date_entity.region_id,
+            date_region.page_id == Page.id,
+            date_entity.entity_type == EntityType.date,
+        ]
+        if date_from is not None:
+            conditions.append(date_entity.date_value >= date_from)
+        if date_to is not None:
+            conditions.append(date_entity.date_value <= date_to)
+        filters.append(exists(select(1).select_from(date_entity).where(*conditions)))
+
+    if entity_type is not None:
+        typed_entity, typed_region = aliased(Entity), aliased(Region)
+        filters.append(
+            exists(
+                select(1)
+                .select_from(typed_entity)
+                .where(
+                    typed_region.id == typed_entity.region_id,
+                    typed_region.page_id == Page.id,
+                    typed_entity.entity_type == entity_type,
+                )
+            )
+        )
+
+    if location is not None:
+        loc_entity, loc_region = aliased(Entity), aliased(Region)
+        filters.append(
+            exists(
+                select(1)
+                .select_from(loc_entity)
+                .where(
+                    loc_region.id == loc_entity.region_id,
+                    loc_region.page_id == Page.id,
+                    loc_entity.entity_type == EntityType.location,
+                    loc_entity.raw_text.op("%")(location),
+                )
+            )
+        )
+
+    if min_confidence is not None:
+        conf_ocr, conf_region = aliased(OCRResultRecord), aliased(Region)
+        filters.append(
+            exists(
+                select(1)
+                .select_from(conf_ocr)
+                .where(
+                    conf_region.id == conf_ocr.region_id,
+                    conf_region.page_id == Page.id,
+                    conf_ocr.confidence >= min_confidence,
+                )
+            )
+        )
+
+    base_stmt = (
+        select(Page.id.label("page_id"), Page.document_id, Document.filename, Page.page_number, rank, snippet)
+        .join(Document, Document.id == Page.document_id)
+        .where(*filters)
+    )
+
+    total = session.scalar(select(func.count()).select_from(base_stmt.with_only_columns(Page.id).subquery()))
+    results_stmt = base_stmt.order_by(rank.desc()).limit(limit).offset(offset)
+    results = [dict(row) for row in session.execute(results_stmt).mappings().all()]
+    return results, total or 0
