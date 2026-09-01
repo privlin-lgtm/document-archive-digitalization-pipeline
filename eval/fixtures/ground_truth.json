@@ -1,0 +1,45 @@
+[
+  {
+    "id": "report_1897",
+    "image": "report_1897.png",
+    "text": "Report filed by John A. Smith Location: Bombay, dated the 3rd day of March, 1897 Amount received: $128.50",
+    "entities": [
+      {"type": "person", "value": "John A. Smith"},
+      {"type": "location", "value": "Mumbai"},
+      {"type": "date", "value": "1897-03-03"},
+      {"type": "amount", "value": "USD 128.50"}
+    ]
+  },
+  {
+    "id": "ledger_shillings",
+    "image": "ledger_shillings.png",
+    "text": "Paid to Robert Jones the sum of L5.4.3 on the 1st of January, 1850",
+    "entities": [
+      {"type": "person", "value": "Robert Jones"},
+      {"type": "amount", "value": "GBP 5.21"},
+      {"type": "date", "value": "1850-01-01"}
+    ]
+  },
+  {
+    "id": "numeric_date_amount",
+    "image": "numeric_date_amount.png",
+    "text": "Invoice 4521 dated 03/15/1923 for $2,400.00 payable to Elizabeth Warren in Calcutta",
+    "entities": [
+      {"type": "date", "value": "1923-03-15"},
+      {"type": "amount", "value": "USD 2400.00"},
+      {"type": "person", "value": "Elizabeth Warren"},
+      {"type": "location", "value": "Kolkata"}
+    ]
+  },
+  {
+    "id": "dollars_cents_words",
+    "image": "dollars_cents_words.png",
+    "text": "Received from Thomas Anderson the sum of 50 dollars and 25 cents in Peking on the 25th day of December, 1901",
+    "entities": [
+      {"type": "person", "value": "Thomas Anderson"},
+      {"type": "amount", "value": "USD 50.25"},
+      {"type": "location", "value": "Beijing"},
+      {"type": "date", "value": "1901-12-25"}
+    ]
+  }
+]

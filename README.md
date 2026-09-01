@@ -279,6 +279,20 @@ against the shared SQLite fixture (Tesseract mocked, same convention as
 `tests/test_ocr_engine.py`); `scripts/smoke_test.py` is the one place a real
 `tesseract` binary and real Postgres actually run together.
 
+### Evaluating OCR/extraction quality
+
+```bash
+docker compose run --rm app python -m eval.report
+```
+
+Runs OCR + entity extraction (no DB/Celery — see `eval/README.md`) against
+a small checked-in ground-truth set (`eval/fixtures/`) and reports
+character/word error rate plus per-entity-type precision/recall/F1, with
+the worst-scoring examples shown for inspection. Use it to judge a pipeline
+change (a new OCR backend, a regex tweak, a threshold change) objectively
+instead of by eye — see `eval/README.md` for the ground-truth format and
+how to add new examples.
+
 ## Project layout
 
 ```
@@ -292,6 +306,7 @@ web/           annotation UI — React/TypeScript, standalone Vite app (see web/
 tests/         pytest suite (backend)
 alembic/       DB migrations
 scripts/       synthetic data seeding (scale) + pipeline smoke test (correctness)
+eval/          OCR/extraction quality evaluation harness (see eval/README.md)
 config.py      pydantic-settings config, read from .env
 worker.py      Celery app + task definitions for async pipeline jobs
 ```
@@ -427,3 +442,9 @@ it does not return the whole table in one response.
   against what was just persisted) — correct for the common case, but two
   entities in the same region with byte-identical raw text could have a
   flag attributed to the wrong one of the pair.
+- `extraction/entities.py`'s OCR-digit-confusion tolerance (`l`/`I` -> `1`,
+  etc.) only applies to the *year* in a date match, not the day or month —
+  found via `eval/report.py` against the `ledger_shillings` fixture, where
+  Tesseract misread "1st" as "ist" and the date entity was silently missed
+  entirely rather than recovered. Worth widening to the day/month capture
+  groups if real archive OCR shows this pattern often.
