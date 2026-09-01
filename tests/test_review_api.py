@@ -201,6 +201,22 @@ class TestGetDocument:
         assert region["ocr_result"]["text"] == "John Smith paid $45.00"
         assert len(region["entities"]) == 1
         assert region["entities"][0]["raw_text"] == "John Smith"
+        assert region["entities"][0]["corrected"] is False
+
+    def test_entity_marked_corrected_after_a_correction(self, api):
+        client, session_factory, *_ = api
+        ids = seed_document_with_page_region(session_factory)
+
+        client.patch(
+            f"/entities/{ids['entity_id']}",
+            headers=auth_headers(),
+            json={"corrected_value": "John A. Smith", "reviewer": "alice"},
+        )
+        response = client.get(f"/documents/{ids['document_id']}", headers=auth_headers())
+
+        entity = response.json()["pages"][0]["regions"][0]["entities"][0]
+        assert entity["corrected"] is True
+        assert entity["normalized_value"] == "John A. Smith"
 
     def test_freshly_uploaded_document_has_empty_pages(self, api):
         client, session_factory, *_ = api
@@ -400,6 +416,71 @@ class TestUpdateReviewFlag:
         response = client.patch(f"/review_flags/{flag_id}", headers=auth_headers(), json={"status": "open"})
 
         assert response.status_code == 422
+
+
+class TestListReviewFlags:
+    def _seed_flag(
+        self, session_factory, *, severity=FlagSeverity.medium, status=ReviewFlagStatus.open, filename="a.png"
+    ) -> str:
+        session = session_factory()
+        document = Document(filename=filename, status=DocumentStatus.needs_review, raw_image_path="/x/a.png")
+        session.add(document)
+        session.flush()
+        flag = ReviewFlag(
+            document_id=document.id, flag_type=FlagType.low_ocr_confidence, severity=severity,
+            explanation="test", status=status,
+        )
+        session.add(flag)
+        session.commit()
+        flag_id = str(flag.id)
+        session.close()
+        return flag_id
+
+    def test_requires_auth(self, api):
+        client, *_ = api
+        assert client.get("/review_flags").status_code == 401
+
+    def test_defaults_to_open_flags_only(self, api):
+        client, session_factory, *_ = api
+        self._seed_flag(session_factory, status=ReviewFlagStatus.open)
+        self._seed_flag(session_factory, status=ReviewFlagStatus.resolved)
+
+        response = client.get("/review_flags", headers=auth_headers())
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["total"] == 1
+        assert body["results"][0]["status"] == "open"
+
+    def test_includes_document_filename(self, api):
+        client, session_factory, *_ = api
+        self._seed_flag(session_factory, filename="important-ledger.png")
+
+        response = client.get("/review_flags", headers=auth_headers())
+
+        assert response.json()["results"][0]["document_filename"] == "important-ledger.png"
+
+    def test_sorted_by_severity_high_first(self, api):
+        client, session_factory, *_ = api
+        self._seed_flag(session_factory, severity=FlagSeverity.low)
+        self._seed_flag(session_factory, severity=FlagSeverity.high)
+        self._seed_flag(session_factory, severity=FlagSeverity.medium)
+
+        response = client.get("/review_flags", headers=auth_headers())
+
+        severities = [r["severity"] for r in response.json()["results"]]
+        assert severities == ["high", "medium", "low"]
+
+    def test_severity_filter(self, api):
+        client, session_factory, *_ = api
+        self._seed_flag(session_factory, severity=FlagSeverity.low)
+        self._seed_flag(session_factory, severity=FlagSeverity.high)
+
+        response = client.get("/review_flags", headers=auth_headers(), params={"severity": "high"})
+
+        results = response.json()["results"]
+        assert len(results) == 1
+        assert results[0]["severity"] == "high"
 
 
 class TestStats:

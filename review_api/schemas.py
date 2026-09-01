@@ -45,6 +45,7 @@ class EntityOut(BaseModel):
     raw_text: str
     normalized_value: str | None
     confidence: float = Field(description="0-1")
+    corrected: bool = Field(description="Whether a human has ever corrected this entity's value")
 
 
 class RegionOut(BaseModel):
@@ -124,6 +125,22 @@ class ReviewFlagUpdateRequest(BaseModel):
     status: Literal["resolved", "dismissed"] = Field(
         description="Target status — reopening a flag isn't done through this endpoint"
     )
+
+
+class ReviewFlagWithDocument(ReviewFlagOut):
+    """A review flag plus enough document context for a queue view to link
+    to it without a second request per row.
+    """
+
+    document_id: UUID
+    document_filename: str
+
+
+class ReviewFlagListResponse(BaseModel):
+    results: list[ReviewFlagWithDocument]
+    limit: int
+    offset: int
+    total: int
 
 
 class StatsResponse(BaseModel):

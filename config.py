@@ -1,6 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -47,6 +48,11 @@ class Settings(BaseSettings):
     # review_api auth: bearer token required on all routes except /health.
     # No default — must be set explicitly so the API can't come up unprotected.
     review_api_token: str
+
+    # Origins allowed to call the API from a browser (the web/ annotation UI
+    # dev server by default). A JSON array in the env var, e.g.
+    # CORS_ALLOWED_ORIGINS=["http://localhost:5173","https://review.example.com"]
+    cors_allowed_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
 
     # App
     app_env: Literal["development", "staging", "production"] = "development"

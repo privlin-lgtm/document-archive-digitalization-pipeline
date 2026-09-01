@@ -24,7 +24,7 @@ from review_api.schemas import (
     ReviewFlagOut,
 )
 from storage.db import get_db
-from storage.models import Document, DocumentStatus, Page, Region
+from storage.models import Document, DocumentStatus, Entity, Page, Region
 from worker import run_ocr_job
 
 logger = logging.getLogger(__name__)
@@ -119,7 +119,10 @@ def get_document(document_id: UUID, db: Session = Depends(get_db)) -> DocumentDe
             selectinload(Document.pages)
             .selectinload(Page.regions)
             .selectinload(Region.ocr_result),
-            selectinload(Document.pages).selectinload(Page.regions).selectinload(Region.entities),
+            selectinload(Document.pages)
+            .selectinload(Page.regions)
+            .selectinload(Region.entities)
+            .selectinload(Entity.corrections),
             selectinload(Document.review_flags),
         )
     ).first()
@@ -157,6 +160,7 @@ def get_document(document_id: UUID, db: Session = Depends(get_db)) -> DocumentDe
                             raw_text=e.raw_text,
                             normalized_value=e.normalized_value,
                             confidence=e.confidence,
+                            corrected=len(e.corrections) > 0,
                         )
                         for e in region.entities
                     ],

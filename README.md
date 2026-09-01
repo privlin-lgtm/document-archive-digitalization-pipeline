@@ -53,8 +53,8 @@ search, and surfaces low-confidence results for human review.
    onto `review_flags`, with a `status` (open/resolved/dismissed) for the
    review workflow.
 
-The **review/search API** (`review_api/`) is what the annotation UI (stage 8)
-will consume:
+The **review/search API** (`review_api/`) is what the annotation UI (`web/`)
+consumes:
 
 - `POST /documents` — upload a scan or batch; enqueues the async OCR job
   (a broker hiccup logs loudly but doesn't fail the upload — the row is
@@ -70,19 +70,33 @@ will consume:
 - `PATCH /entities/{id}` — records a human correction (`entity_corrections`
   keeps a full audit trail — original value, corrected value, reviewer,
   timestamp — `raw_text`, the original OCR output, is never touched)
-- `PATCH /review_flags/{id}` — resolve or dismiss a flag
+- `GET /review_flags` — the review queue: open flags sorted by severity,
+  each with enough document context to link straight to it;
+  `PATCH /review_flags/{id}` — resolve or dismiss a flag
 - `GET /stats` — dashboard summary: documents processed, pending review,
   average confidence, open flags by type
 
-This scaffold wires up stages 1-7: upload → stored row → full review/search
-API is end-to-end, and preprocessing/layout/OCR/extraction/schema/anomaly-
-detection are implemented and tested. The `regions`/`entities`/
-`review_flags` tables are in place and the API can read/write them — but
-nothing yet *populates* them automatically from an upload (wiring
-ingestion → OCR → extraction → anomaly detection into one pipeline that
-runs when `run_ocr_job` fires) is stage 9's job. Until then, `POST
+**Web annotation UI** (`web/`) — React + TypeScript + Mantine, consuming the
+API above: a dashboard (stats, recent documents, upload), a split-pane
+document view (pan/zoom image with clickable region overlays synced to an
+entity panel with inline correction), a keyboard-navigable review queue,
+and a search view with filters and highlighted snippets. See
+[`web/README.md`](web/README.md) for the stack, structure, and how to run
+it — including a note on which parts are a first-pass scaffold versus
+tuned interaction design (per the project's own tool-choice notes, this
+stage split component structure/API client/routing from interactive
+polish).
+
+This scaffold wires up stages 1-8: upload → stored row → full review/search
+API → annotation UI is end-to-end, and preprocessing/layout/OCR/extraction/
+schema/anomaly-detection are implemented and tested. The `regions`/
+`entities`/`review_flags` tables are in place and the API/UI can read/write
+them — but nothing yet *populates* them automatically from an upload
+(wiring ingestion → OCR → extraction → anomaly detection into one pipeline
+that runs when `run_ocr_job` fires) is stage 9's job. Until then, `POST
 /documents` creates the `documents` row and enqueues the job, but the job
-itself is still a stub.
+itself is still a stub — so freshly uploaded documents show up with no
+pages/regions/entities until stage 9 lands.
 
 ### Trying the OCR engine
 
@@ -212,8 +226,8 @@ ocr/           OCR engine abstraction (multi-backend)
 extraction/    entity extraction (entities.py) + review-flagging (anomalies.py)
 storage/       SQLAlchemy models, DB session, full-text/BRIN/trigram search queries
 review_api/    FastAPI app: health, documents, search, entities, review_flags, stats
-web/           annotation UI (served by review_api)
-tests/         pytest suite
+web/           annotation UI — React/TypeScript, standalone Vite app (see web/README.md)
+tests/         pytest suite (backend)
 alembic/       DB migrations
 scripts/       synthetic data seeding for exercising the schema at scale
 config.py      pydantic-settings config, read from .env
@@ -224,6 +238,7 @@ worker.py      Celery app + task definitions for async OCR jobs
 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) for dependency management
+- Node.js 20+ and npm, if working on `web/` (the annotation UI)
 - Docker + Docker Compose for running the full stack
 
 ## Local development
@@ -297,6 +312,10 @@ Everything else has a sane default:
 - `MAX_UPLOAD_SIZE_BYTES` — upload size cap enforced by `ingestion.upload`
 - `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` — Redis URLs for the async
   job queue
+- `CORS_ALLOWED_ORIGINS` — browser origins allowed to call the API (JSON
+  array; defaults to `["http://localhost:5173"]`, the `web/` dev server).
+  CORS only gates which origins a *browser* will let through — the bearer
+  token still authorizes every request beyond `/health`.
 
 `GET /documents` is paginated (`limit`, default 50, max 500; `offset`) —
 it does not return the whole table in one response.
@@ -320,3 +339,11 @@ it does not return the whole table in one response.
   fuzzy gazetteer hit — a place with no gazetteer entry that the base model
   also fails to tag will be missed. `en_core_web_trf` (the `ner-transformer`
   extra) would improve base coverage.
+- `web/`'s pan/zoom (drag-to-pan, scroll-to-zoom), confidence color
+  thresholds, and keyboard-shortcut feel are a first pass, not tuned —
+  deliberately so: the project's own stage 8 notes split this scaffold
+  (component structure, typed API client, routing) from the interactive
+  "look at it, nudge it" polish pass, which needs a human watching in real
+  time rather than an autonomous agent. Everything is functionally wired
+  and tested end-to-end against a live backend; the remaining work is feel,
+  not plumbing.

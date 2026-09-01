@@ -7,3 +7,9 @@ __pycache__/
 .env
 data/
 document-archive-pipeline-prompts.md
+
+# web/ is a separate Vite app the Python backend image never needs; without
+# this, `COPY . .` would pull node_modules (100s of MB) into every build.
+web/node_modules/
+web/dist/
+web/.env
