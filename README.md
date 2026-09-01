@@ -9,10 +9,15 @@ search, and surfaces low-confidence results for human review.
 1. **Upload** (`ingestion/`) — a scanned image is received via the API and
    written to the configured storage backend (local disk or S3); a `documents`
    row is created with status `uploaded`.
-2. **Preprocess** — deskew, denoise, and binarize the raw scan so OCR gets a
-   cleaner input, especially for faded/aged paper.
-3. **OCR** (`ocr/`) — an async worker job runs the configured OCR engine
-   (Tesseract, TrOCR, or Textract) against the preprocessed image.
+2. **Preprocess** (`ocr/preprocess.py`) — deskew, denoise, and binarize the
+   raw scan so OCR gets a cleaner input, especially for faded/aged paper. Also
+   computes a sharpness/contrast quality score to flag likely-poor-OCR scans
+   early.
+3. **OCR** (`ocr/engine.py`) — a router classifies each region as typed or
+   handwritten and dispatches to the matching backend (Tesseract for typed
+   text, a pluggable TrOCR/cloud backend for handwriting), falling back to
+   the other backend if one fails or times out. Output is structured: full
+   text, per-word bounding boxes, and document/line-level confidence.
 4. **Extract** (`extraction/`) — structured entities (names, dates, places,
    etc.) are pulled from the OCR text.
 5. **Index** (`storage/`) — OCR text and entities are persisted to Postgres,
@@ -21,9 +26,24 @@ search, and surfaces low-confidence results for human review.
    confidence or detected anomalies are queued for a human reviewer via the
    annotation UI.
 
-This scaffold wires up stages 1 and 6 end-to-end (upload → stored row → API)
-with stubs for stages 2-5; OCR and extraction logic are implemented in later
-iterations.
+This scaffold wires up stages 1, 2, 3, and 6: upload → stored row → API is
+end-to-end, and OCR preprocessing/engine are implemented and tested. Entity
+extraction (stage 4) and search indexing (stage 5) are still stubs.
+
+### Trying the OCR engine
+
+```bash
+uv run python -m ocr.engine run path/to/scan.png
+```
+
+Prints structured JSON (text, per-word boxes/confidence, document/line
+confidence). Requires the `tesseract-ocr` binary on PATH (installed
+automatically in the Docker image) for the typed-text backend. The
+handwriting backend (TrOCR) needs the optional `handwriting` extra:
+
+```bash
+uv sync --extra handwriting
+```
 
 ## Project layout
 
