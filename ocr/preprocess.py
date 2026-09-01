@@ -19,9 +19,23 @@ LOW_CONTRAST_STDDEV_THRESHOLD = 40.0
 DESKEW_ANGLE_RANGE = 15.0
 DESKEW_ANGLE_STEP = 0.5
 
+# The angle search is scale-invariant, so it runs against a downsampled copy
+# of the page — a full-resolution 300dpi scan (~8M px) would otherwise cost
+# 61 full-size affine warps per document, which is a real per-page throughput
+# bottleneck at archive scale. Width in pixels to downsample to before search.
+DESKEW_SEARCH_WIDTH = 600
+
+
+def _require_image(image: np.ndarray) -> None:
+    if image is None:
+        raise ValueError("image is None (did cv2.imread fail to read the file?)")
+    if image.size == 0 or 0 in image.shape[:2]:
+        raise ValueError(f"image has an empty dimension: shape={image.shape}")
+
 
 def to_grayscale(image: np.ndarray) -> np.ndarray:
     """Convert a BGR/RGB image to single-channel grayscale. No-op if already gray."""
+    _require_image(image)
     if image.ndim == 2:
         return image
     return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -49,9 +63,17 @@ def estimate_skew_angle(image: np.ndarray) -> float:
 
     Uses the projection-profile method: binarize, then search a range of
     candidate angles for the one that maximizes row-sum variance (i.e. text
-    lines are most sharply separated from background gaps).
+    lines are most sharply separated from background gaps). The search runs
+    on a downsampled copy — skew angle doesn't depend on resolution, and
+    searching at full page resolution would be 61x full-size affine warps
+    per document.
     """
     gray = to_grayscale(image)
+    if gray.shape[1] > DESKEW_SEARCH_WIDTH:
+        scale = DESKEW_SEARCH_WIDTH / gray.shape[1]
+        gray = cv2.resize(
+            gray, (DESKEW_SEARCH_WIDTH, max(1, int(gray.shape[0] * scale))), interpolation=cv2.INTER_AREA
+        )
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
     best_angle = 0.0

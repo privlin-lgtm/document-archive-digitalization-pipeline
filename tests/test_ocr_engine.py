@@ -142,6 +142,31 @@ class TestTesseractBackend:
         assert result.text == ""
         assert result.document_confidence == 0.0
 
+    def test_non_numeric_confidence_is_skipped_not_fatal(self, monkeypatch):
+        """A malformed conf value from tesseract must not crash the whole
+        OCR call — it should just skip that one row.
+        """
+        import pytesseract
+
+        fake_data = {
+            "block_num": [1, 1],
+            "par_num": [1, 1],
+            "line_num": [1, 1],
+            "left": [0, 20],
+            "top": [0, 0],
+            "width": [10, 10],
+            "height": [10, 10],
+            "conf": ["not-a-number", "90"],
+            "text": ["Bad", "Good"],
+        }
+        monkeypatch.setattr(pytesseract, "image_to_data", lambda *a, **k: fake_data)
+
+        backend = TesseractBackend()
+        result = backend.run(np.zeros((10, 10), dtype=np.uint8))
+
+        assert [w.text for w in result.words] == ["Good"]
+        assert result.status == "ok"
+
 
 # --------------------------------------------------------------------------
 # TrOCRBackend (unavailable without the optional 'handwriting' extra)
@@ -183,8 +208,11 @@ class AlwaysFailBackend(OCRBackend):
 class SlowBackend(OCRBackend):
     name = "slow"
 
+    def __init__(self, sleep_seconds: float = 1.0):
+        self.sleep_seconds = sleep_seconds
+
     def run(self, image: np.ndarray) -> OCRResult:
-        time.sleep(1.0)
+        time.sleep(self.sleep_seconds)
         return OCRResult(text="late", words=[], engine=self.name, document_confidence=0.0, line_confidences={})
 
 
@@ -226,6 +254,27 @@ class TestOCRRouter:
             timeout=0.1,
         )
         result = router.run(np.zeros((10, 10), dtype=np.uint8), region_type="typed")
+        assert result.status == "ocr_partial"
+        assert result.engine == "fast_fallback"
+
+    def test_timeout_does_not_block_for_the_full_hang_duration(self):
+        """Regression test: _run_with_timeout previously used
+        `with ThreadPoolExecutor(...) as executor:`, whose __exit__ calls
+        shutdown(wait=True) — which blocks until the hung call actually
+        finishes, silently defeating the configured timeout. A router with
+        timeout=0.2s against a 3s-hanging backend must return promptly, not
+        after ~3s.
+        """
+        router = OCRRouter(
+            typed_backend=SlowBackend(sleep_seconds=3.0),
+            handwriting_backend=FixedResultBackend("fast_fallback"),
+            timeout=0.2,
+        )
+        start = time.monotonic()
+        result = router.run(np.zeros((10, 10), dtype=np.uint8), region_type="typed")
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 1.0, f"router.run took {elapsed:.2f}s, expected well under the 3s hang"
         assert result.status == "ocr_partial"
         assert result.engine == "fast_fallback"
 

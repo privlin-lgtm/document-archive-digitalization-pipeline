@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import logging
 import sys
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
@@ -22,6 +23,8 @@ import cv2
 import numpy as np
 
 from ocr.preprocess import to_grayscale
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------
 # Structured result types
@@ -165,8 +168,14 @@ class TesseractBackend(OCRBackend):
 
         for i, raw_text in enumerate(data["text"]):
             text = raw_text.strip()
-            confidence = float(data["conf"][i])
-            if not text or confidence < 0:
+            if not text:
+                continue
+            try:
+                confidence = float(data["conf"][i])
+            except (TypeError, ValueError):
+                logger.warning("tesseract returned a non-numeric confidence for word %r; skipping", text)
+                continue
+            if confidence < 0:
                 continue
 
             line_key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
@@ -295,9 +304,14 @@ class OCRRouter:
         try:
             return self._run_with_timeout(primary, image)
         except Exception as primary_error:
+            logger.warning("primary backend '%s' failed: %s", primary.name, primary_error)
             try:
                 result = self._run_with_timeout(fallback, image)
             except Exception as fallback_error:
+                logger.error(
+                    "both backends failed: primary '%s' (%s), fallback '%s' (%s)",
+                    primary.name, primary_error, fallback.name, fallback_error,
+                )
                 return OCRResult(
                     text="",
                     words=[],
@@ -318,14 +332,26 @@ class OCRRouter:
             return result
 
     def _run_with_timeout(self, backend: OCRBackend, image: np.ndarray) -> OCRResult:
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(backend.run, image)
-            try:
-                return future.result(timeout=self.timeout)
-            except FutureTimeoutError as exc:
-                raise BackendTimeoutError(
-                    f"backend '{backend.name}' timed out after {self.timeout}s"
-                ) from exc
+        # Deliberately not a `with ThreadPoolExecutor(...) as executor:` block:
+        # Executor.__exit__ calls shutdown(wait=True), which blocks until the
+        # submitted call actually finishes — completely defeating the timeout
+        # for a genuinely hung backend (verified: a 0.2s timeout against a 2s
+        # hang didn't return until the full 2s). Python can't forcibly kill a
+        # running thread, so on timeout we let it run to completion in the
+        # background (shutdown(wait=False)) and return control immediately.
+        # A true kill requires a process-based executor — deferred as follow-up.
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(backend.run, image)
+        try:
+            result = future.result(timeout=self.timeout)
+        except FutureTimeoutError as exc:
+            executor.shutdown(wait=False)
+            raise BackendTimeoutError(
+                f"backend '{backend.name}' timed out after {self.timeout}s"
+            ) from exc
+        else:
+            executor.shutdown(wait=False)
+            return result
 
 
 # --------------------------------------------------------------------------

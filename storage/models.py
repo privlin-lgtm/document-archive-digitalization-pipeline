@@ -13,6 +13,7 @@ class DocumentStatus(str, enum.Enum):
     preprocessing = "preprocessing"
     ocr_running = "ocr_running"
     ocr_done = "ocr_done"
+    ocr_partial = "ocr_partial"
     extracting = "extracting"
     indexed = "indexed"
     needs_review = "needs_review"

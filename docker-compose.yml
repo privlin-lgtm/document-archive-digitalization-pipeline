@@ -6,8 +6,8 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: document_archive
-    ports:
-      - "5432:5432"
+    # No host port published: app/worker reach this over the internal compose
+    # network. For a local psql shell, use `docker compose exec db psql ...`.
     volumes:
       - db_data:/var/lib/postgresql/data
     healthcheck:

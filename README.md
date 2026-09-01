@@ -102,19 +102,58 @@ migrations against it:
 docker compose exec app uv run alembic upgrade head
 ```
 
-Health check:
+Health check (open, no auth needed):
 
 ```bash
 curl http://localhost:8000/health
 ```
 
+`/documents*` requires a bearer token (see Configuration below):
+
+```bash
+curl -H "Authorization: Bearer $REVIEW_API_TOKEN" http://localhost:8000/documents
+```
+
+The `db` service no longer publishes its port to the host — `app`/`worker`
+reach it over the internal compose network. For a local `psql` shell:
+
+```bash
+docker compose exec db psql -U postgres -d document_archive
+```
+
 ## Configuration
 
-All configuration is via environment variables (see `.env.example`):
+All configuration is via environment variables (see `.env.example`). Two
+have no default and the app fails fast at startup if they're unset:
 
-- `DATABASE_URL` — Postgres connection string
+- `DATABASE_URL` — Postgres connection string. The default in
+  `.env.example` (`postgres`/`postgres`) is for local dev only — **rotate
+  these credentials before any real deployment.**
+- `REVIEW_API_TOKEN` — bearer token required on all `/documents*` routes
+  (`/health` stays open for container healthchecks). Generate one with
+  `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+
+Everything else has a sane default:
+
+- `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` / `DB_POOL_RECYCLE_SECONDS` — SQLAlchemy
+  connection pool tuning
 - `OCR_ENGINE` — `tesseract` | `trocr` | `textract`
 - `STORAGE_BACKEND` — `local` | `s3`, plus `STORAGE_LOCAL_PATH` /
   `STORAGE_S3_BUCKET` / `STORAGE_S3_REGION`
+- `MAX_UPLOAD_SIZE_BYTES` — upload size cap enforced by `ingestion.upload`
 - `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` — Redis URLs for the async
   job queue
+
+`GET /documents` is paginated (`limit`, default 50, max 500; `offset`) —
+it does not return the whole table in one response.
+
+## Known limitations / accepted follow-up work
+
+- `ocr/layout.py`'s region classification thresholds are tuned against
+  synthetic test fixtures, not validated against real scans — expect
+  misclassification on real documents until calibrated (planned for the
+  stage 6 review-flagging work).
+- `OCRRouter`'s per-backend timeout can't forcibly kill a hung thread
+  (a Python limitation) — on timeout it stops waiting and falls back
+  immediately, but the original call keeps running in the background until
+  it finishes on its own. A true kill needs a process-based executor.

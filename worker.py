@@ -1,8 +1,15 @@
+import logging
+
 from celery import Celery
 
 from config import get_settings
 
 settings = get_settings()
+
+logging.basicConfig(
+    level=settings.log_level,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 celery_app = Celery(
     "document_archive",

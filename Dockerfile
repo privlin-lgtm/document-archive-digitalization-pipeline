@@ -8,9 +8,12 @@ RUN pip install --no-cache-dir uv
 
 WORKDIR /srv
 
-COPY pyproject.toml ./
-COPY . .
+# Copy only the dependency manifests first so `uv sync` is a cacheable layer —
+# it only re-runs when dependencies actually change, not on every source edit.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --no-dev --no-install-project
 
+COPY . .
 RUN uv sync --no-dev
 
 ENV PATH="/srv/.venv/bin:$PATH"
