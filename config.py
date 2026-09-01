@@ -33,6 +33,17 @@ class Settings(BaseSettings):
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"
 
+    # Anomaly/review-flag thresholds (extraction/anomalies.py) — configurable
+    # rather than hardcoded, since the "right" threshold depends on the
+    # archive's actual scan/OCR quality and is expected to need tuning.
+    low_ocr_confidence_threshold: float = 60.0  # 0-100, OCRResult/OCRWord scale
+    illegible_confidence_threshold: float = 15.0  # 0-100
+    illegible_alnum_ratio_threshold: float = 0.4  # fraction of non-whitespace chars that must be alnum
+    entity_conflict_min_year: int = 1000
+    entity_conflict_max_year: int = 2100
+    entity_conflict_max_plausible_amount: float = 1_000_000.0
+    entity_conflict_name_fuzzy_threshold: float = 0.75  # 0-1; below this, treated as different people
+
     # review_api auth: bearer token required on all routes except /health.
     # No default — must be set explicitly so the API can't come up unprotected.
     review_api_token: str

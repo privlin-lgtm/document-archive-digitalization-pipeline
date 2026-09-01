@@ -3,7 +3,6 @@ import uuid
 from datetime import UTC, date, datetime
 
 from sqlalchemy import (
-    Boolean,
     Computed,
     Date,
     Enum,
@@ -211,11 +210,18 @@ class FlagType(str, enum.Enum):
     extraction_failure = "extraction_failure"
 
 
+class ReviewFlagStatus(str, enum.Enum):
+    open = "open"
+    resolved = "resolved"
+    dismissed = "dismissed"
+
+
 class ReviewFlag(Base):
     __tablename__ = "review_flags"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
+    page_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("pages.id", ondelete="CASCADE"), nullable=True)
     region_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("regions.id", ondelete="CASCADE"), nullable=True
     )
@@ -225,8 +231,12 @@ class ReviewFlag(Base):
     flag_type: Mapped[FlagType] = mapped_column(Enum(FlagType, name="review_flag_type"), nullable=False)
     severity: Mapped[FlagSeverity] = mapped_column(Enum(FlagSeverity, name="review_flag_severity"), nullable=False)
     explanation: Mapped[str] = mapped_column(Text, nullable=False)
-    resolved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    resolved_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    status: Mapped[ReviewFlagStatus] = mapped_column(
+        Enum(ReviewFlagStatus, name="review_flag_status"),
+        nullable=False,
+        default=ReviewFlagStatus.open,
+    )
+    status_changed_at: Mapped[datetime | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
 
     document: Mapped[Document] = relationship(back_populates="review_flags")

@@ -41,17 +41,25 @@ search, and surfaces low-confidence results for human review.
    example queries as parameterized functions, with a real EXPLAIN ANALYZE
    walkthrough (not a hypothetical one) of the BRIN/B-tree tradeoff in its
    module docstring.
-6. **Review** (`review_api/`, `web/`) — documents with low OCR/extraction
-   confidence or detected anomalies are queued for a human reviewer via the
-   annotation UI.
+6. **Review** (`extraction/anomalies.py`, `review_api/`, `web/`) — after OCR
+   and extraction, `anomalies.py` flags content needing human review:
+   `low_ocr_confidence` (a region or an individual word below threshold),
+   `illegible` (near-zero confidence, or output that's mostly
+   non-alphanumeric noise), `entity_conflict` (an implausible date/amount,
+   or two person names within a document that are similar-but-not-identical
+   — likely OCR variance on the same person), and `extraction_failure` (a
+   table/signature region with no amount/person entity extracted from it).
+   All thresholds are configurable (`config.py`), not hardcoded. Flags map
+   onto `review_flags`, with a `status` (open/resolved/dismissed) for the
+   review workflow.
 
 This scaffold wires up stages 1-6: upload → stored row → API is
-end-to-end, and preprocessing/layout/OCR/extraction/schema are implemented
-and tested. The `regions`/`entities` tables are in place so the annotation
-UI can highlight "this date came from this box on the page" — actually
-*writing* extraction output into them (i.e. wiring ingestion → OCR →
-extraction → these tables end-to-end as a pipeline) and the anomaly-flagging
-logic that populates `review_flags` (stage 6) are the remaining pieces.
+end-to-end, and preprocessing/layout/OCR/extraction/schema/anomaly-detection
+are implemented and tested. The `regions`/`entities`/`review_flags` tables
+are in place so the annotation UI can highlight "this date came from this
+box on the page" — actually *writing* pipeline output into them (wiring
+ingestion → OCR → extraction → anomaly detection → these tables end-to-end)
+is stage 9's job.
 
 ### Trying the OCR engine
 
@@ -118,6 +126,27 @@ for r in queries.full_text_search(session, 'John Smith Bombay'):
 `tests/test_queries.py` runs against this seeded data when a live Postgres
 is reachable (skipped otherwise, e.g. plain `uv run pytest` on the host —
 the `db` service doesn't publish a host port, see Configuration below).
+
+### Trying anomaly detection
+
+```bash
+uv run python -c "
+from extraction.anomalies import detect_entity_conflicts
+from extraction.entities import ExtractedEntity
+
+entities = [
+    ExtractedEntity('date', '2999-01-01', 'the 1st of January, 2999', 0.9, 0, 10),
+    ExtractedEntity('person', 'John Smith', 'John Smith', 0.7, 0, 10),
+    ExtractedEntity('person', 'John Smyth', 'John Smyth', 0.7, 20, 30),
+]
+for f in detect_entity_conflicts(entities):
+    print(f)
+"
+```
+
+Operates purely on the in-memory dataclasses from the OCR/extraction stages
+(no DB needed) — `detect_all_anomalies` runs every check for one document's
+regions/OCR results/entities at once.
 
 ## Project layout
 
