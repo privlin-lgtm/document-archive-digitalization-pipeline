@@ -43,12 +43,33 @@ export default function App() {
         <Sidebar />
       </AppShell.Navbar>
 
-      <AppShell.Main style={{ height: "calc(100vh - 56px)", display: "flex", flexDirection: "column", overflow: "auto" }}>
+      <AppShell.Main style={{ height: "calc(100vh - 56px)", display: "flex", flexDirection: "column", overflow: "hidden" }}>
         <Routes>
-          <Route path="/" element={<DashboardPage />} />
+          <Route
+            path="/"
+            element={
+              <div className="page-scroll">
+                <DashboardPage />
+              </div>
+            }
+          />
           <Route path="/documents/:documentId" element={<DocumentViewPage />} />
-          <Route path="/review" element={<ReviewQueuePage />} />
-          <Route path="/search" element={<SearchPage />} />
+          <Route
+            path="/review"
+            element={
+              <div className="page-scroll">
+                <ReviewQueuePage />
+              </div>
+            }
+          />
+          <Route
+            path="/search"
+            element={
+              <div className="page-scroll">
+                <SearchPage />
+              </div>
+            }
+          />
         </Routes>
       </AppShell.Main>
     </AppShell>

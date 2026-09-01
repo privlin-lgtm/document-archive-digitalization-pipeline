@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { Group, Loader, NumberInput, Paper, Select, Stack, Text, TextInput } from "@mantine/core";
+import { useDebouncedValue } from "@mantine/hooks";
 import { IconSearch } from "@tabler/icons-react";
 import { useSearch } from "../hooks/useSearch";
 import { SnippetHighlight } from "../components/SnippetHighlight";
@@ -20,9 +21,10 @@ export function SearchPage() {
   const [entityType, setEntityType] = useState<string | null>(null);
   const [location, setLocation] = useState("");
   const [minConfidence, setMinConfidence] = useState<number | string>("");
+  const [debouncedQ] = useDebouncedValue(q, 250);
 
   const { data, isFetching } = useSearch({
-    q,
+    q: debouncedQ,
     date_from: dateFrom || undefined,
     date_to: dateTo || undefined,
     entity_type: (entityType as EntityType) || undefined,
@@ -38,6 +40,7 @@ export function SearchPage() {
         value={q}
         onChange={(event) => setQ(event.currentTarget.value)}
         size="md"
+        autoFocus
       />
 
       <Group grow>
@@ -68,7 +71,15 @@ export function SearchPage() {
             {data.total} result{data.total === 1 ? "" : "s"}
           </Text>
           {data.results.map((result) => (
-            <Paper key={result.page_id} withBorder p="sm" radius="sm" component={Link} to={`/documents/${result.document_id}`}>
+            <Paper
+              key={result.page_id}
+              withBorder
+              p="sm"
+              radius="sm"
+              className="search-hit"
+              component={Link}
+              to={`/documents/${result.document_id}`}
+            >
               <Group justify="space-between">
                 <Text size="sm" fw={500}>
                   {result.filename} — page {result.page_number}

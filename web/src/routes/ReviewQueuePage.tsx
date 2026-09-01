@@ -1,18 +1,16 @@
-import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { Alert, Button, Center, Group, Kbd, Loader, Paper, Stack, Text } from "@mantine/core";
+import { useHotkeys } from "@mantine/hooks";
 import { useReviewFlags, useUpdateReviewFlag } from "../hooks/useReviewFlags";
 import { FlagBadge } from "../components/FlagBadge";
 
-/**
- * Keyboard shortcuts (first pass — exact keys/feel are a good candidate
- * for the interactive tuning pass): j/↓ next, k/↑ prev, r resolve
- * (+ advance), x dismiss (+ advance), s skip (advance without acting).
- */
 export function ReviewQueuePage() {
   const { data, isLoading, error } = useReviewFlags({ status: "open" });
   const updateFlag = useUpdateReviewFlag();
   const [cursor, setCursor] = useState(0);
+  const navigate = useNavigate();
+  const itemRefs = useRef<Array<HTMLDivElement | null>>([]);
 
   const flags = data?.results ?? [];
   const current = flags[cursor];
@@ -24,24 +22,34 @@ export function ReviewQueuePage() {
   }, [flags.length, cursor]);
 
   useEffect(() => {
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+    itemRefs.current[cursor]?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [cursor]);
 
-      if (event.key === "j" || event.key === "ArrowDown") {
-        event.preventDefault();
-        setCursor((c) => Math.min(c + 1, flags.length - 1));
-      } else if (event.key === "k" || event.key === "ArrowUp") {
-        event.preventDefault();
-        setCursor((c) => Math.max(c - 1, 0));
-      } else if (event.key === "s") {
-        setCursor((c) => Math.min(c + 1, flags.length - 1));
-      } else if ((event.key === "r" || event.key === "x") && current) {
-        updateFlag.mutate({ flagId: current.id, body: { status: event.key === "r" ? "resolved" : "dismissed" } });
-      }
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [flags.length, current, updateFlag]);
+  function move(delta: number) {
+    setCursor((value) => Math.min(Math.max(value + delta, 0), Math.max(flags.length - 1, 0)));
+  }
+
+  function resolve(status: "resolved" | "dismissed") {
+    if (!current) return;
+    updateFlag.mutate({ flagId: current.id, body: { status } });
+  }
+
+  useHotkeys([
+    ["j", () => move(1)],
+    ["ArrowDown", () => move(1)],
+    ["k", () => move(-1)],
+    ["ArrowUp", () => move(-1)],
+    ["s", () => move(1)],
+    ["a", () => resolve("resolved")],
+    ["r", () => resolve("resolved")],
+    ["x", () => resolve("dismissed")],
+    [
+      "Enter",
+      () => {
+        if (current) navigate(`/documents/${current.document_id}?flag=${current.id}`);
+      },
+    ],
+  ]);
 
   if (isLoading) {
     return (
@@ -65,10 +73,26 @@ export function ReviewQueuePage() {
           Review queue ({data?.total ?? 0} open)
         </Text>
         <Group gap={6}>
-          <Kbd>j</Kbd>/<Kbd>k</Kbd> <Text size="xs" c="dimmed" span>next/prev</Text>
-          <Kbd>r</Kbd> <Text size="xs" c="dimmed" span>resolve</Text>
-          <Kbd>x</Kbd> <Text size="xs" c="dimmed" span>dismiss</Text>
-          <Kbd>s</Kbd> <Text size="xs" c="dimmed" span>skip</Text>
+          <Kbd>j</Kbd>/<Kbd>k</Kbd>{" "}
+          <Text size="xs" c="dimmed" span>
+            next/prev
+          </Text>
+          <Kbd>a</Kbd>{" "}
+          <Text size="xs" c="dimmed" span>
+            approve
+          </Text>
+          <Kbd>x</Kbd>{" "}
+          <Text size="xs" c="dimmed" span>
+            dismiss
+          </Text>
+          <Kbd>s</Kbd>{" "}
+          <Text size="xs" c="dimmed" span>
+            skip
+          </Text>
+          <Kbd>↵</Kbd>{" "}
+          <Text size="xs" c="dimmed" span>
+            open
+          </Text>
         </Group>
       </Group>
 
@@ -82,18 +106,20 @@ export function ReviewQueuePage() {
               withBorder
               p="sm"
               radius="sm"
-              onClick={() => setCursor(index)}
-              style={{
-                cursor: "pointer",
-                borderColor: index === cursor ? "#1c7ed6" : undefined,
-                backgroundColor: index === cursor ? "rgba(28, 126, 214, 0.06)" : undefined,
+              className="review-queue-item"
+              data-active={index === cursor ? "true" : "false"}
+              ref={(node) => {
+                itemRefs.current[index] = node;
               }}
+              onClick={() => setCursor(index)}
+              onDoubleClick={() => navigate(`/documents/${flag.document_id}?flag=${flag.id}`)}
+              style={{ cursor: "pointer" }}
             >
               <Group justify="space-between" wrap="nowrap">
                 <Stack gap={2} style={{ minWidth: 0, flex: 1 }}>
                   <Group gap="xs">
                     <FlagBadge flagType={flag.flag_type} severity={flag.severity} />
-                    <Link to={`/documents/${flag.document_id}`} onClick={(e) => e.stopPropagation()}>
+                    <Link to={`/documents/${flag.document_id}?flag=${flag.id}`} onClick={(event) => event.stopPropagation()}>
                       <Text size="sm" fw={500} truncate>
                         {flag.document_filename}
                       </Text>
@@ -109,8 +135,8 @@ export function ReviewQueuePage() {
                     variant="light"
                     color="green"
                     loading={updateFlag.isPending && current?.id === flag.id}
-                    onClick={(e) => {
-                      e.stopPropagation();
+                    onClick={(event) => {
+                      event.stopPropagation();
                       updateFlag.mutate({ flagId: flag.id, body: { status: "resolved" } });
                     }}
                   >
@@ -120,8 +146,8 @@ export function ReviewQueuePage() {
                     size="xs"
                     variant="light"
                     color="gray"
-                    onClick={(e) => {
-                      e.stopPropagation();
+                    onClick={(event) => {
+                      event.stopPropagation();
                       updateFlag.mutate({ flagId: flag.id, body: { status: "dismissed" } });
                     }}
                   >

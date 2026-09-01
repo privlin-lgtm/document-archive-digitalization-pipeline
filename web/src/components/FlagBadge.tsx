@@ -1,6 +1,6 @@
 import { Badge } from "@mantine/core";
 import type { FlagSeverity, FlagType } from "../api/types";
-import { flagSeverityColor } from "../utils/confidence";
+import { FLAG_TYPE_MANTINE } from "../utils/confidence";
 
 const FLAG_TYPE_LABELS: Record<FlagType, string> = {
   low_ocr_confidence: "Low OCR confidence",
@@ -11,7 +11,7 @@ const FLAG_TYPE_LABELS: Record<FlagType, string> = {
 
 export function FlagBadge({ flagType, severity }: { flagType: FlagType; severity: FlagSeverity }) {
   return (
-    <Badge color={flagSeverityColor(severity)} variant="filled" size="sm">
+    <Badge color={FLAG_TYPE_MANTINE[flagType]} variant={severity === "high" ? "filled" : "light"} size="sm">
       {FLAG_TYPE_LABELS[flagType] ?? flagType}
     </Badge>
   );

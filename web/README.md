@@ -64,7 +64,8 @@ npm run lint        # oxlint
   clickable.
 - **Review queue** (`/review`) — open flags sorted by severity (high
   first), with resolve/dismiss actions and keyboard shortcuts (`j`/`k` or
-  arrow keys to move, `r` resolve, `x` dismiss, `s` skip).
+  arrow keys to move, `a`/`r` approve, `x` dismiss, `s` skip, `Enter` to
+  open the document).
 - **Search** (`/search`) — full-text query with date range / entity type /
   location / min-confidence filters, ranked results with highlighted
   snippets. Snippets come from Postgres `ts_headline()` and embed the
@@ -84,9 +85,9 @@ thresholds, click-to-highlight snappiness, keyboard shortcut tuning) is
 explicitly handed to an interactive "look at the screen, nudge it, look
 again" pass, which an agent working unattended can't do well.
 
-This is that first pass. Everything listed above is real and functionally
-wired end-to-end against a live backend (verified manually: upload, the
-split-pane view with real regions/entities, click-to-select sync, entity
-correction with the audit-trail badge, review-queue resolve/dismiss, and
-search with all four filters) — not a mockup. What it hasn't had is the
-second pass's polish.
+That second pass is in. The document view keeps image overlays and the
+entity panel in sync (click and hover), pans the selected region into view,
+color-codes overlays by confidence and flag type, distinguishes
+AI-extracted vs human-corrected entities, and supports reviewer keyboard
+shortcuts (`j`/`k` next/prev flag, `a`/`r` approve, `s` skip, `e` edit,
+`+`/`-`/`0` zoom).
