@@ -21,19 +21,27 @@ search, and surfaces low-confidence results for human review.
    text, a pluggable TrOCR/cloud backend for handwriting — falling back to
    the other backend if one fails or times out. Output is structured: full
    text, per-word bounding boxes, and document/line-level confidence.
-4. **Extract** (`extraction/`) — structured entities (names, dates, places,
-   etc.) are pulled from the OCR text.
+4. **Extract** (`extraction/entities.py`) — a spaCy NER pipeline (base
+   PERSON/GPE detection) plus two custom pipeline components layer
+   rule-based parsing for historical dates ("the 3rd day of March, 1897",
+   OCR-mangled digits like "l897") and currency (modern `$1,234.56` and
+   pre-decimal `£3 12s 6d` ledger notation). Place names are disambiguated
+   against a small historical-name gazetteer with rapidfuzz fuzzy matching,
+   so a single OCR-misread character doesn't lose the match. Every entity
+   carries a normalized value, raw text, a confidence blending the
+   extraction method with OCR confidence, and an optional source region
+   bbox.
 5. **Index** (`storage/`) — OCR text and entities are persisted to Postgres,
    with a full-text search index for querying the archive.
 6. **Review** (`review_api/`, `web/`) — documents with low OCR/extraction
    confidence or detected anomalies are queued for a human reviewer via the
    annotation UI.
 
-This scaffold wires up stages 1, 2, 3, and 6: upload → stored row → API is
-end-to-end, and preprocessing/layout/OCR are implemented and tested. Entity
-extraction (stage 4) and search indexing (stage 5) are still stubs; region
-metadata from `layout.py` is structured to be persisted once the `regions`
-table lands in stage 5, so the annotation UI can highlight "this date came
+This scaffold wires up stages 1, 2, 3, 4, and 6: upload → stored row → API
+is end-to-end, and preprocessing/layout/OCR/extraction are implemented and
+tested. Search indexing (stage 5) is still a stub; region and entity
+metadata are structured to be persisted once the `regions`/`entities`
+tables land in stage 5, so the annotation UI can highlight "this date came
 from this box on the page."
 
 ### Trying the OCR engine
@@ -49,6 +57,27 @@ handwriting backend (TrOCR) needs the optional `handwriting` extra:
 
 ```bash
 uv sync --extra handwriting
+```
+
+### Trying entity extraction
+
+```bash
+uv run python -c "
+from extraction.entities import extract_entities
+for e in extract_entities('John Smith paid £3 12s 6d on the 3rd day of March, 1897 in Bombay.'):
+    print(e)
+"
+```
+
+Uses `en_core_web_sm` by default (installed automatically, no extra
+download). For higher NER accuracy, install the transformer pipeline and
+point `NER_MODEL` at it:
+
+```bash
+uv sync --extra ner-transformer
+```
+```
+NER_MODEL=en_core_web_trf
 ```
 
 ## Project layout
@@ -157,3 +186,12 @@ it does not return the whole table in one response.
   (a Python limitation) — on timeout it stops waiting and falls back
   immediately, but the original call keeps running in the background until
   it finishes on its own. A true kill needs a process-based executor.
+- `extraction/entities.py`'s location detection depends on spaCy's base NER
+  first finding *some* entity span — `en_core_web_sm` was trained mostly on
+  modern text, so it sometimes mislabels historical/colonial place names
+  (e.g. "Calcutta" as PRODUCT) or misses them entirely. Two bounded
+  fallbacks recover common cases (checking ORG/PRODUCT-labeled spans and
+  untagged proper nouns against the gazetteer), but only ever on an exact or
+  fuzzy gazetteer hit — a place with no gazetteer entry that the base model
+  also fails to tag will be missed. `en_core_web_trf` (the `ner-transformer`
+  extra) would improve base coverage.

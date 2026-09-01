@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     # OCR
     ocr_engine: Literal["tesseract", "trocr", "textract"] = "tesseract"
 
+    # Entity extraction: spaCy NER model. Default is fast with no heavy deps;
+    # swap in en_core_web_trf via the `ner-transformer` extra for higher
+    # accuracy (much larger install: torch + spacy-transformers + ~500MB model).
+    ner_model: str = "en_core_web_sm"
+
     # Storage backend for raw/processed images
     storage_backend: Literal["local", "s3"] = "local"
     storage_local_path: str = "./data/documents"

@@ -19,6 +19,13 @@ dependencies = [
     "opencv-python-headless>=4.10",
     "pillow>=10.4",
     "pytesseract>=0.3.13",
+    "spacy>=3.8.16",
+    "rapidfuzz>=3.14.6",
+    # spaCy's small English pipeline — not on PyPI, installed from its wheel
+    # release. Default NER backend: fast, no torch dependency. Swap in the
+    # `ner-transformer` extra below for higher accuracy at a much heavier
+    # install cost.
+    "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
 ]
 
 [project.optional-dependencies]
@@ -34,6 +41,14 @@ handwriting = [
     "transformers>=4.44",
     "torch>=2.4",
 ]
+# Higher-accuracy transformer NER pipeline for extraction/entities.py
+# (spec's suggested en_core_web_trf). Heavy: torch + spacy-transformers +
+# a ~500MB model. Install with `uv sync --extra ner-transformer`, then set
+# NER_MODEL=en_core_web_trf.
+ner-transformer = [
+    "spacy-transformers>=1.3",
+    "en-core-web-trf @ https://github.com/explosion/spacy-models/releases/download/en_core_web_trf-3.8.0/en_core_web_trf-3.8.0-py3-none-any.whl",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -41,6 +56,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["ingestion", "ocr", "extraction", "storage", "review_api", "web"]
+
+[tool.hatch.metadata]
+# Required for the en-core-web-sm/en-core-web-trf direct-URL dependencies
+# above — spaCy models aren't published to PyPI.
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
