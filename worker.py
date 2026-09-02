@@ -1,6 +1,8 @@
 import logging
+from datetime import UTC, datetime, timedelta
 
 from celery import Celery
+from sqlalchemy import select
 
 from config import get_settings
 
@@ -17,6 +19,19 @@ celery_app = Celery(
     "document_archive",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
+)
+celery_app.conf.update(
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
+    worker_prefetch_multiplier=1,
+    task_time_limit=900,
+    task_soft_time_limit=840,
+    beat_schedule={
+        "reconcile-orphans": {
+            "task": "worker.reconcile_orphans",
+            "schedule": 120.0,
+        }
+    },
 )
 
 
@@ -44,3 +59,37 @@ def run_ocr_job(self, document_id: str) -> None:
             mark_document_error(document_id, str(exc))
             raise
         raise self.retry(exc=exc, countdown=30 * (2**self.request.retries))
+
+
+@celery_app.task(name="worker.reconcile_orphans")
+def reconcile_orphans() -> int:
+    """Re-enqueue documents stuck in uploaded/enqueue_failed after a broker drop."""
+    from storage.db import SessionLocal
+    from storage.models import Document, DocumentStatus
+
+    cutoff = datetime.now(UTC) - timedelta(minutes=2)
+    session = SessionLocal()
+    requeued = 0
+    try:
+        orphans = session.scalars(
+            select(Document).where(
+                Document.status.in_((DocumentStatus.uploaded, DocumentStatus.enqueue_failed)),
+                Document.upload_time < cutoff,
+            )
+        ).all()
+        for document in orphans:
+            try:
+                run_ocr_job.delay(str(document.id))
+            except Exception:
+                logger.exception("reconcile failed to enqueue document %s", document.id)
+                continue
+            if document.status == DocumentStatus.enqueue_failed:
+                document.status = DocumentStatus.uploaded
+                document.error_message = None
+                session.commit()
+            requeued += 1
+        if requeued:
+            logger.info("reconciled %d orphaned document(s)", requeued)
+        return requeued
+    finally:
+        session.close()

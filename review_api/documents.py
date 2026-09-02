@@ -1,18 +1,17 @@
 import io
 import logging
 import uuid
-from pathlib import Path
 from uuid import UUID
 
 import cv2
-import numpy as np
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from config import get_settings
 from ingestion.upload import UnsafeFilenameError, UploadTooLargeError, save_raw_image
+from ingestion.validate import InvalidImageError, decode_and_check_image, read_upload_bounded
 from review_api.auth import require_api_token
 from review_api.rate_limit import enforce_rate_limit
 from review_api.schemas import (
@@ -28,6 +27,7 @@ from review_api.schemas import (
 )
 from storage.db import get_db
 from storage.models import Document, DocumentStatus, Entity, Page, Region
+from storage.paths import UnsafeStoragePath, confined_path
 from worker import run_ocr_job
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,6 @@ router = APIRouter(
 DEFAULT_PAGE_LIMIT = 50
 MAX_PAGE_LIMIT = 500
 
-# BGR, one per ocr.layout.RegionType, for the annotated-image endpoint.
 _REGION_TYPE_COLORS: dict[str, tuple[int, int, int]] = {
     "paragraph": (0, 200, 0),
     "table": (200, 0, 0),
@@ -52,18 +51,23 @@ _REGION_TYPE_COLORS: dict[str, tuple[int, int, int]] = {
 _DEFAULT_REGION_COLOR = (128, 128, 128)
 
 
+def _enqueue(document: Document, db: Session) -> bool:
+    try:
+        run_ocr_job.delay(str(document.id))
+        return True
+    except Exception:
+        logger.exception("failed to enqueue OCR job for document %s", document.id)
+        document.status = DocumentStatus.enqueue_failed
+        document.error_message = "failed to enqueue pipeline job"
+        db.commit()
+        return False
+
+
 @router.post("", status_code=201, response_model=list[DocumentCreated])
 async def upload_documents(
     files: list[UploadFile] = File(..., description="One or more scanned document images"),
     db: Session = Depends(get_db),
 ) -> list[DocumentCreated]:
-    """Upload a scan (or batch of scans). Each file is persisted to the
-    configured storage backend, given a `documents` row (status=uploaded),
-    and has its OCR job enqueued. A broker hiccup while enqueuing doesn't
-    fail the upload — the row is the source of truth and can be reconciled
-    later — but is logged loudly since it means that document will silently
-    never get processed otherwise.
-    """
     settings = get_settings()
     if len(files) > settings.max_files_per_upload:
         raise HTTPException(
@@ -74,27 +78,13 @@ async def upload_documents(
             ),
         )
 
-    created: list[Document] = []
+    created: list[tuple[Document, bool]] = []
     for upload in files:
-        content = await upload.read()
-
-        # Reject anything that isn't a real, decodable image *before* it's
-        # ever written to disk or handed to the pipeline -- filename
-        # sanitization alone doesn't stop someone from uploading an
-        # arbitrary file (a script, an archive, garbage bytes) under an
-        # innocuous-looking name. cv2.imdecode raises (rather than
-        # returning None, its behavior for any other malformed input) on a
-        # genuinely empty buffer, so that case is checked separately first.
-        decoded = (
-            cv2.imdecode(np.frombuffer(content, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
-            if content
-            else None
-        )
-        if decoded is None:
-            raise HTTPException(
-                status_code=400,
-                detail=f"{upload.filename or 'upload'!r} is not a readable image",
-            )
+        try:
+            content = await read_upload_bounded(upload, settings.max_upload_size_bytes)
+            decode_and_check_image(content)
+        except InvalidImageError as exc:
+            raise HTTPException(status_code=400, detail=f"{upload.filename or 'upload'!r}: {exc}") from exc
 
         document_id = uuid.uuid4()
         try:
@@ -111,17 +101,27 @@ async def upload_documents(
             status=DocumentStatus.uploaded,
         )
         db.add(document)
-        created.append(document)
+        db.commit()
+        db.refresh(document)
+        enqueued = _enqueue(document, db)
+        created.append((document, enqueued))
 
+    return [
+        DocumentCreated(id=d.id, filename=d.filename, status=d.status.value, enqueued=enqueued)
+        for d, enqueued in created
+    ]
+
+
+@router.post("/{document_id}/reprocess", response_model=DocumentCreated)
+def reprocess_document(document_id: UUID, db: Session = Depends(get_db)) -> DocumentCreated:
+    document = db.get(Document, document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="document not found")
+    document.status = DocumentStatus.uploaded
+    document.error_message = None
     db.commit()
-
-    for document in created:
-        try:
-            run_ocr_job.delay(str(document.id))
-        except Exception:
-            logger.exception("failed to enqueue OCR job for document %s", document.id)
-
-    return [DocumentCreated(id=d.id, filename=d.filename, status=d.status.value) for d in created]
+    enqueued = _enqueue(document, db)
+    return DocumentCreated(id=document.id, filename=document.filename, status=document.status.value, enqueued=enqueued)
 
 
 @router.get("", response_model=DocumentListResponse)
@@ -131,9 +131,12 @@ def list_documents(
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ) -> DocumentListResponse:
+    count_stmt = select(func.count()).select_from(Document)
     stmt = select(Document).order_by(Document.upload_time.desc()).limit(limit).offset(offset)
     if status is not None:
+        count_stmt = count_stmt.where(Document.status == status)
         stmt = stmt.where(Document.status == status)
+    total = db.scalar(count_stmt) or 0
     documents = db.scalars(stmt).all()
     return DocumentListResponse(
         results=[
@@ -142,12 +145,12 @@ def list_documents(
         ],
         limit=limit,
         offset=offset,
+        total=total,
     )
 
 
 @router.get("/{document_id}", response_model=DocumentDetail)
 def get_document(document_id: UUID, db: Session = Depends(get_db)) -> DocumentDetail:
-    """Full document detail: status, OCR text, regions, entities, flags."""
     document = db.scalars(
         select(Document)
         .where(Document.id == document_id)
@@ -228,7 +231,7 @@ def get_document(document_id: UUID, db: Session = Depends(get_db)) -> DocumentDe
         filename=document.filename,
         upload_time=document.upload_time,
         status=document.status.value,
-        raw_image_path=document.raw_image_path,
+        error_message=document.error_message,
         pages=pages,
         flags=flags,
     )
@@ -238,13 +241,19 @@ def get_document(document_id: UUID, db: Session = Depends(get_db)) -> DocumentDe
 def get_document_image(
     document_id: UUID,
     annotate: bool = Query(False, description="Draw region bounding boxes, colored by region type"),
+    page: int = Query(1, ge=1),
     db: Session = Depends(get_db),
 ):
     document = db.get(Document, document_id)
     if document is None:
         raise HTTPException(status_code=404, detail="document not found")
 
-    image_path = Path(document.raw_image_path)
+    page_row = db.scalar(select(Page).where(Page.document_id == document.id, Page.page_number == page))
+    stored = (page_row.processed_image_path if page_row else None) or document.processed_image_path or document.raw_image_path
+    try:
+        image_path = confined_path(stored)
+    except UnsafeStoragePath:
+        raise HTTPException(status_code=403, detail="invalid image path") from None
     if not image_path.is_file():
         raise HTTPException(status_code=404, detail="image file not found on disk")
 
@@ -255,7 +264,10 @@ def get_document_image(
     if image is None:
         raise HTTPException(status_code=500, detail="failed to read image file")
 
-    regions = db.scalars(select(Region).join(Page).where(Page.document_id == document_id)).all()
+    regions_stmt = select(Region).join(Page).where(Page.document_id == document_id)
+    if page_row is not None:
+        regions_stmt = regions_stmt.where(Page.id == page_row.id)
+    regions = db.scalars(regions_stmt).all()
     for region in regions:
         color = _REGION_TYPE_COLORS.get(region.region_type.value, _DEFAULT_REGION_COLOR)
         top_left = (region.bbox_x, region.bbox_y)

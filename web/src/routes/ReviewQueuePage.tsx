@@ -4,9 +4,13 @@ import { Alert, Button, Center, Group, Kbd, Loader, Paper, Stack, Text } from "@
 import { useHotkeys } from "@mantine/hooks";
 import { useReviewFlags, useUpdateReviewFlag } from "../hooks/useReviewFlags";
 import { FlagBadge } from "../components/FlagBadge";
+import { OffsetPager } from "../components/OffsetPager";
+
+const PAGE_SIZE = 50;
 
 export function ReviewQueuePage() {
-  const { data, isLoading, error } = useReviewFlags({ status: "open" });
+  const [offset, setOffset] = useState(0);
+  const { data, isLoading, error } = useReviewFlags({ status: "open", limit: PAGE_SIZE, offset });
   const updateFlag = useUpdateReviewFlag();
   const [cursor, setCursor] = useState(0);
   const navigate = useNavigate();
@@ -30,7 +34,7 @@ export function ReviewQueuePage() {
   }
 
   function resolve(status: "resolved" | "dismissed") {
-    if (!current) return;
+    if (!current || updateFlag.isPending) return;
     updateFlag.mutate({ flagId: current.id, body: { status } });
   }
 
@@ -159,6 +163,7 @@ export function ReviewQueuePage() {
           ))}
         </Stack>
       )}
+      {data ? <OffsetPager total={data.total} limit={PAGE_SIZE} offset={offset} onChange={setOffset} /> : null}
     </Stack>
   );
 }

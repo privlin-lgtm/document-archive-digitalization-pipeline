@@ -29,6 +29,7 @@ from pathlib import Path
 
 from config import get_settings
 from ingestion.upload import UnsafeFilenameError, UploadTooLargeError, save_raw_image
+from ingestion.validate import InvalidImageError, decode_and_check_image
 from storage.db import SessionLocal
 from storage.models import Document, DocumentStatus
 from worker import run_ocr_job
@@ -53,8 +54,9 @@ def ingest_one(path: Path) -> uuid.UUID | None:
     document_id = uuid.uuid4()
     content = path.read_bytes()
     try:
+        decode_and_check_image(content)
         raw_image_path = save_raw_image(document_id, path.name, content)
-    except (UnsafeFilenameError, UploadTooLargeError):
+    except (UnsafeFilenameError, UploadTooLargeError, InvalidImageError):
         logger.exception("skipping %s: could not be saved", path)
         return None
 
@@ -72,14 +74,21 @@ def ingest_one(path: Path) -> uuid.UUID | None:
     finally:
         session.close()
 
+    session = SessionLocal()
     try:
         run_ocr_job.delay(str(document_id))
     except Exception:
         logger.exception(
-            "document %s (%s) was created but its pipeline job failed to enqueue -- "
-            "it will need to be reconciled/re-enqueued manually",
+            "document %s (%s) was created but its pipeline job failed to enqueue",
             document_id, path,
         )
+        document = session.get(Document, document_id)
+        if document is not None:
+            document.status = DocumentStatus.enqueue_failed
+            document.error_message = "failed to enqueue pipeline job"
+            session.commit()
+    finally:
+        session.close()
     return document_id
 
 
@@ -106,10 +115,8 @@ def ingest_directory(directory: Path, *, concurrency: int = DEFAULT_CONCURRENCY)
 
 def watch_directory(directory: Path, *, concurrency: int, poll_interval: float) -> None:
     """Poll `directory` for filenames not yet seen, ingesting each as it
-    appears. Plain polling rather than an OS filesystem-event watcher (e.g.
-    watchdog/inotify) -- no new dependency, and archive drop-offs aren't
-    latency-sensitive; swap in an event-based watcher if sub-second pickup
-    ever matters.
+    appears. A file is only marked seen after a successful ingest so a
+    transient failure is retried on the next poll.
     """
     seen: set[str] = set()
     logger.info("watching %s every %.0fs for new scans (Ctrl+C to stop)", directory, poll_interval)
@@ -117,13 +124,16 @@ def watch_directory(directory: Path, *, concurrency: int, poll_interval: float) 
         new_paths = [p for p in _discover_images(directory) if p.name not in seen]
         if new_paths:
             with ThreadPoolExecutor(max_workers=concurrency) as executor:
-                futures = [executor.submit(ingest_one, p) for p in new_paths]
+                futures = {executor.submit(ingest_one, p): p for p in new_paths}
                 for future in as_completed(futures):
+                    path = futures[future]
                     try:
-                        future.result()
+                        document_id = future.result()
                     except Exception:
-                        logger.exception("unexpected error during watched ingest")
-            seen.update(p.name for p in new_paths)
+                        logger.exception("unexpected error during watched ingest of %s", path)
+                        continue
+                    if document_id is not None:
+                        seen.add(path.name)
         time.sleep(poll_interval)
 
 

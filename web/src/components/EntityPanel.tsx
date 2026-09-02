@@ -7,8 +7,6 @@ import { useSelectionStore } from "../state/selection";
 import { useCorrectEntity } from "../hooks/useEntityCorrection";
 import { ConfidenceBadge } from "./ConfidenceBadge";
 
-const REVIEWER_KEY = "archive-reviewer";
-
 const ENTITY_TYPE_LABELS: Record<string, string> = {
   person: "Person",
   date: "Date",
@@ -28,14 +26,10 @@ function EntityRow({
   entity,
   regionId,
   documentId,
-  reviewer,
-  onNeedReviewer,
 }: {
   entity: EntityOut;
   regionId: string;
   documentId: string;
-  reviewer: string;
-  onNeedReviewer: () => void;
 }) {
   const selectedEntityId = useSelectionStore((s) => s.selectedEntityId);
   const selectedRegionId = useSelectionStore((s) => s.selectedRegionId);
@@ -63,12 +57,8 @@ function EntityRow({
 
   function submitCorrection() {
     if (!draftValue.trim()) return;
-    if (!reviewer.trim()) {
-      onNeedReviewer();
-      return;
-    }
     correctEntity.mutate(
-      { entityId: entity.id, body: { corrected_value: draftValue.trim(), reviewer: reviewer.trim() } },
+      { entityId: entity.id, body: { corrected_value: draftValue.trim() } },
       { onSuccess: () => setEditingEntityId(null) },
     );
   }
@@ -84,6 +74,9 @@ function EntityRow({
       }}
       onMouseEnter={() => hoverEntity(entity.id, regionId)}
       onMouseLeave={() => hoverEntity(null, null)}
+      role={isEditing ? undefined : "button"}
+      tabIndex={isEditing ? -1 : 0}
+      aria-pressed={isSelected}
       className="entity-row"
       data-selected={isSelected ? "true" : "false"}
       data-hovered={isHovered && !isSelected ? "true" : "false"}
@@ -189,13 +182,9 @@ function EntityRow({
 function RegionBlock({
   region,
   documentId,
-  reviewer,
-  onNeedReviewer,
 }: {
   region: RegionOut;
   documentId: string;
-  reviewer: string;
-  onNeedReviewer: () => void;
 }) {
   const selectedRegionId = useSelectionStore((s) => s.selectedRegionId);
   const selectedEntityId = useSelectionStore((s) => s.selectedEntityId);
@@ -239,8 +228,6 @@ function RegionBlock({
             entity={entity}
             regionId={region.id}
             documentId={documentId}
-            reviewer={reviewer}
-            onNeedReviewer={onNeedReviewer}
           />
         ))
       )}
@@ -250,15 +237,9 @@ function RegionBlock({
 
 export function EntityPanel({ pages, documentId }: { pages: PageOut[]; documentId: string }) {
   const panelRef = useRef<HTMLDivElement>(null);
-  const reviewerRef = useRef<HTMLInputElement>(null);
-  const [reviewer, setReviewer] = useState(() => localStorage.getItem(REVIEWER_KEY) ?? "");
   const selectedEntityId = useSelectionStore((s) => s.selectedEntityId);
   const selectedRegionId = useSelectionStore((s) => s.selectedRegionId);
   const setEditingEntityId = useSelectionStore((s) => s.setEditingEntityId);
-
-  useEffect(() => {
-    localStorage.setItem(REVIEWER_KEY, reviewer);
-  }, [reviewer]);
 
   useEffect(() => {
     const id = selectedEntityId ?? selectedRegionId;
@@ -286,15 +267,6 @@ export function EntityPanel({ pages, documentId }: { pages: PageOut[]; documentI
 
   return (
     <Stack gap="sm" p="md" className="entity-panel" ref={panelRef}>
-      <TextInput
-        ref={reviewerRef}
-        size="xs"
-        label="Reviewer"
-        description="Used when you submit a correction. Stored locally."
-        placeholder="Your name or email"
-        value={reviewer}
-        onChange={(event) => setReviewer(event.currentTarget.value)}
-      />
       {pages.map((page) => (
         <Stack key={page.id} gap="xs">
           <Text size="sm" fw={700}>
@@ -305,8 +277,6 @@ export function EntityPanel({ pages, documentId }: { pages: PageOut[]; documentI
               key={region.id}
               region={region}
               documentId={documentId}
-              reviewer={reviewer}
-              onNeedReviewer={() => reviewerRef.current?.focus()}
             />
           ))}
         </Stack>

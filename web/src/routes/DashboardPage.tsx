@@ -1,9 +1,10 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Badge, Button, Card, FileButton, Group, Loader, Paper, SimpleGrid, Stack, Table, Text } from "@mantine/core";
 import { IconUpload } from "@tabler/icons-react";
 import { useStats } from "../hooks/useStats";
 import { useDocuments, useUploadDocuments } from "../hooks/useDocuments";
+import { OffsetPager } from "../components/OffsetPager";
 
 function StatCard({ label, value }: { label: string; value: string | number }) {
   return (
@@ -18,9 +19,12 @@ function StatCard({ label, value }: { label: string; value: string | number }) {
   );
 }
 
+const PAGE_SIZE = 20;
+
 export function DashboardPage() {
+  const [offset, setOffset] = useState(0);
   const { data: stats } = useStats();
-  const { data: documents, isLoading } = useDocuments({ limit: 20 });
+  const { data: documents, isLoading } = useDocuments({ limit: PAGE_SIZE, offset });
   const uploadDocuments = useUploadDocuments();
   const resetRef = useRef<() => void>(null);
   const navigate = useNavigate();
@@ -82,6 +86,9 @@ export function DashboardPage() {
             </Table.Tbody>
           </Table>
         )}
+        {documents ? (
+          <OffsetPager total={documents.total} limit={PAGE_SIZE} offset={offset} onChange={setOffset} />
+        ) : null}
       </Paper>
     </Stack>
   );

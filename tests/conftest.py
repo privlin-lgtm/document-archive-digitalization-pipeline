@@ -24,7 +24,9 @@ CREATE TABLE documents (
     filename TEXT NOT NULL,
     upload_time DATETIME NOT NULL,
     status TEXT NOT NULL,
-    raw_image_path TEXT NOT NULL
+    raw_image_path TEXT NOT NULL,
+    processed_image_path TEXT,
+    error_message TEXT
 );
 
 CREATE TABLE pages (
@@ -33,6 +35,7 @@ CREATE TABLE pages (
     page_number INTEGER NOT NULL,
     full_text TEXT,
     full_text_search TEXT,
+    processed_image_path TEXT,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(document_id, page_number)
 );

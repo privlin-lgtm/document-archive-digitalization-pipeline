@@ -52,6 +52,10 @@ def pipeline_env(monkeypatch, sqlite_session_factory, tmp_path):
     disk -- cv2.imread needs an actual file.
     """
     monkeypatch.setattr(pipeline_run, "SessionLocal", sqlite_session_factory)
+    monkeypatch.setattr(
+        "storage.paths.get_settings",
+        lambda: type("S", (), {"storage_local_path": str(tmp_path)})(),
+    )
 
     image_path = tmp_path / "scan.png"
     cv2.imwrite(str(image_path), _paragraph_block_image())
@@ -214,6 +218,7 @@ class TestErrorHandling:
         session = session_factory()
         document = session.get(Document, document_id)
         assert document.status == DocumentStatus.error
+        assert document.error_message == "boom"
 
 
 class TestConcurrentPipelineRuns:

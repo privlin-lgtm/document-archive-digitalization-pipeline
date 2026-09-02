@@ -14,7 +14,8 @@ class DocumentCreated(BaseModel):
 
     id: UUID
     filename: str
-    status: str = Field(description="Initial status — always 'uploaded' right after upload")
+    status: str = Field(description="uploaded, or enqueue_failed if the broker rejected the job")
+    enqueued: bool = True
 
 
 class DocumentSummary(BaseModel):
@@ -30,6 +31,7 @@ class DocumentListResponse(BaseModel):
     results: list[DocumentSummary]
     limit: int
     offset: int
+    total: int
 
 
 class OCRResultOut(BaseModel):
@@ -87,7 +89,7 @@ class DocumentDetail(BaseModel):
     filename: str
     upload_time: datetime
     status: str
-    raw_image_path: str
+    error_message: str | None = None
     pages: list[PageOut]
     flags: list[ReviewFlagOut]
 
@@ -109,8 +111,11 @@ class SearchResponse(BaseModel):
 
 
 class EntityCorrectionRequest(BaseModel):
-    corrected_value: str = Field(min_length=1, description="The reviewer's corrected value")
-    reviewer: str = Field(min_length=1, description="Identifier for who made the correction")
+    corrected_value: str = Field(min_length=1, max_length=2000, description="The reviewer's corrected value")
+    reviewer: str | None = Field(
+        default=None,
+        description="Ignored — reviewer is taken from the authenticated session",
+    )
 
 
 class EntityCorrectionOut(BaseModel):

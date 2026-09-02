@@ -27,3 +27,15 @@ export function useUploadDocuments() {
     },
   });
 }
+
+export function useReprocessDocument(documentId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.reprocessDocument(documentId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["document", documentId] });
+      queryClient.invalidateQueries({ queryKey: ["documents"] });
+      queryClient.invalidateQueries({ queryKey: ["stats"] });
+    },
+  });
+}

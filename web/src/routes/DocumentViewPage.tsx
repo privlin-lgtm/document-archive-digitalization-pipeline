@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
-import { Alert, Badge, Group, Kbd, Loader, Stack, Text } from "@mantine/core";
+import { Alert, Badge, Button, Group, Kbd, Loader, Stack, Text } from "@mantine/core";
 import { useHotkeys } from "@mantine/hooks";
-import { useDocument } from "../hooks/useDocuments";
+import { useDocument, useReprocessDocument } from "../hooks/useDocuments";
 import { useUpdateReviewFlag } from "../hooks/useReviewFlags";
 import { ImageCanvas, type ImageCanvasHandle } from "../components/ImageCanvas";
 import { EntityPanel } from "../components/EntityPanel";
@@ -53,6 +53,7 @@ export function DocumentViewPage() {
   const { documentId } = useParams<{ documentId: string }>();
   const [searchParams] = useSearchParams();
   const { data: document, isLoading, error } = useDocument(documentId);
+  const reprocess = useReprocessDocument(documentId ?? "");
   const updateFlag = useUpdateReviewFlag();
   const canvasRef = useRef<ImageCanvasHandle>(null);
   const initializedDocumentId = useRef<string | null>(null);
@@ -121,7 +122,7 @@ export function DocumentViewPage() {
   }
 
   function resolveCurrent(status: "resolved" | "dismissed") {
-    if (!currentFlag) return;
+    if (!currentFlag || updateFlag.isPending) return;
     const next = openFlags[currentFlagIndex + 1] ?? openFlags[currentFlagIndex - 1] ?? null;
     updateFlag.mutate(
       { flagId: currentFlag.id, body: { status } },
@@ -194,6 +195,16 @@ export function DocumentViewPage() {
         </Stack>
         <Group gap="xs" wrap="nowrap">
           <Badge variant="light">{document.status}</Badge>
+          {document.status === "enqueue_failed" || document.status === "error" ? (
+            <Button size="xs" variant="light" loading={reprocess.isPending} onClick={() => reprocess.mutate()}>
+              Reprocess
+            </Button>
+          ) : null}
+          {document.error_message ? (
+            <Text size="xs" c="red" lineClamp={1}>
+              {document.error_message}
+            </Text>
+          ) : null}
           {openFlags.slice(0, 4).map((flag) => (
             <FlagBadge key={flag.id} flagType={flag.flag_type} severity={flag.severity} />
           ))}

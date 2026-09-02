@@ -7,11 +7,13 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run"
   },
   "dependencies": {
     "@mantine/core": "^9.6.0",
     "@mantine/hooks": "^9.6.0",
+    "@mantine/notifications": "^9.6.0",
     "@tabler/icons-react": "^3.46.0",
     "@tanstack/react-query": "^5.102.8",
     "react": "^19.2.8",
@@ -20,12 +22,16 @@
     "zustand": "^5.0.15"
   },
   "devDependencies": {
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.3",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.1.0",
+    "jsdom": "^30.0.1",
     "oxlint": "^1.79.0",
     "typescript": "~6.0.2",
-    "vite": "^8.2.2"
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11"
   }
 }

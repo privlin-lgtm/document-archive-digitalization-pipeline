@@ -1,27 +1,42 @@
 import secrets
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from config import get_settings
+from review_api.principal import AuthPrincipal
+from review_api.session import COOKIE_NAME, SessionError, read_session
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def require_api_token(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
-) -> None:
-    """Bearer-token auth dependency for routes that expose document data.
+) -> AuthPrincipal:
+    """Accept a session cookie (browser) or a bearer token (CLI/workers).
 
-    Applied to the documents router only — /health stays open so container
-    healthchecks/load balancers don't need a credential.
+    Session identity is the reviewer recorded at login. Bearer callers are
+    attributed as `service-account` so the client cannot spoof reviewer.
     """
+    cookie = request.cookies.get(COOKIE_NAME)
+    if cookie:
+        try:
+            return AuthPrincipal(reviewer=read_session(cookie), via="session")
+        except SessionError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="invalid or expired session",
+            ) from None
+
     settings = get_settings()
-    if credentials is None or not secrets.compare_digest(
+    if credentials is not None and secrets.compare_digest(
         credentials.credentials, settings.review_api_token
     ):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="missing or invalid bearer token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        return AuthPrincipal(reviewer="service-account", via="bearer")
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="missing or invalid credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )

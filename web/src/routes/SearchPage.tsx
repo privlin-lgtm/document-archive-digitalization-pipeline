@@ -5,7 +5,10 @@ import { useDebouncedValue } from "@mantine/hooks";
 import { IconSearch } from "@tabler/icons-react";
 import { useSearch } from "../hooks/useSearch";
 import { SnippetHighlight } from "../components/SnippetHighlight";
+import { OffsetPager } from "../components/OffsetPager";
 import type { EntityType } from "../api/types";
+
+const PAGE_SIZE = 20;
 
 const ENTITY_TYPE_OPTIONS = [
   { value: "person", label: "Person" },
@@ -21,6 +24,7 @@ export function SearchPage() {
   const [entityType, setEntityType] = useState<string | null>(null);
   const [location, setLocation] = useState("");
   const [minConfidence, setMinConfidence] = useState<number | string>("");
+  const [offset, setOffset] = useState(0);
   const [debouncedQ] = useDebouncedValue(q, 250);
 
   const { data, isFetching } = useSearch({
@@ -30,6 +34,8 @@ export function SearchPage() {
     entity_type: (entityType as EntityType) || undefined,
     location: location || undefined,
     min_confidence: minConfidence === "" ? undefined : Number(minConfidence),
+    limit: PAGE_SIZE,
+    offset,
   });
 
   return (
@@ -38,7 +44,10 @@ export function SearchPage() {
         placeholder="Search document text…"
         leftSection={<IconSearch size={16} />}
         value={q}
-        onChange={(event) => setQ(event.currentTarget.value)}
+        onChange={(event) => {
+          setQ(event.currentTarget.value);
+          setOffset(0);
+        }}
         size="md"
         autoFocus
       />
@@ -93,6 +102,7 @@ export function SearchPage() {
               </Text>
             </Paper>
           ))}
+          <OffsetPager total={data.total} limit={PAGE_SIZE} offset={offset} onChange={setOffset} />
         </Stack>
       )}
     </Stack>

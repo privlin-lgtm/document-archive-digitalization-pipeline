@@ -12,14 +12,11 @@ import type {
   ReviewFlagUpdateRequest,
   SearchFilters,
   SearchResponse,
+  SessionOut,
   StatsResponse,
 } from "./types";
 
-// Dev-only auth: a single reviewer role is assumed for MVP (per the stage 8
-// spec), so the API token lives in an env var rather than a login flow.
-// A future multi-user pass would replace this with real session auth.
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
-const API_TOKEN = import.meta.env.VITE_API_TOKEN ?? "";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "/api";
 
 export class ApiError extends Error {
   status: number;
@@ -33,10 +30,6 @@ export class ApiError extends Error {
   }
 }
 
-function authHeaders(): HeadersInit {
-  return { Authorization: `Bearer ${API_TOKEN}` };
-}
-
 async function parseErrorBody(response: Response): Promise<unknown> {
   try {
     return await response.json();
@@ -47,8 +40,9 @@ async function parseErrorBody(response: Response): Promise<unknown> {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
+    credentials: "include",
     ...init,
-    headers: { ...authHeaders(), ...init?.headers },
+    headers: { ...init?.headers },
   });
   if (!response.ok) {
     throw new ApiError(response.status, await parseErrorBody(response));
@@ -71,6 +65,22 @@ function buildQuery<T extends object>(params: T): string {
 }
 
 export const api = {
+  login(reviewer: string, password: string): Promise<SessionOut> {
+    return request<SessionOut>("/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reviewer, password }),
+    });
+  },
+
+  logout(): Promise<void> {
+    return request<void>("/auth/logout", { method: "POST" });
+  },
+
+  me(): Promise<SessionOut> {
+    return request<SessionOut>("/auth/me");
+  },
+
   uploadDocuments(files: File[]): Promise<DocumentCreated[]> {
     const formData = new FormData();
     for (const file of files) {
@@ -87,14 +97,13 @@ export const api = {
     return request<DocumentDetail>(`/documents/${id}`);
   },
 
-  /**
-   * The image endpoint requires a Bearer header, which a plain <img src>
-   * can't attach — fetch it as a blob and hand back an object URL instead.
-   * Callers must revoke the URL (URL.revokeObjectURL) when done with it.
-   */
-  async getDocumentImageUrl(id: string, annotate: boolean): Promise<string> {
-    const response = await fetch(`${API_BASE_URL}/documents/${id}/image${buildQuery({ annotate })}`, {
-      headers: authHeaders(),
+  reprocessDocument(id: string): Promise<DocumentCreated> {
+    return request<DocumentCreated>(`/documents/${id}/reprocess`, { method: "POST" });
+  },
+
+  async getDocumentImageUrl(id: string, annotate: boolean, page = 1): Promise<string> {
+    const response = await fetch(`${API_BASE_URL}/documents/${id}/image${buildQuery({ annotate, page })}`, {
+      credentials: "include",
     });
     if (!response.ok) {
       throw new ApiError(response.status, await parseErrorBody(response));

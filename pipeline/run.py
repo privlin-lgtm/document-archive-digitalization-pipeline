@@ -26,12 +26,11 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import contextmanager
-from datetime import date
 from typing import TYPE_CHECKING
 from uuid import UUID
 
 import cv2
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from extraction.anomalies import detect_all_anomalies
@@ -39,7 +38,9 @@ from extraction.entities import ExtractedEntity, extract_entities
 from ocr.engine import OCRResult, OCRRouter, TesseractBackend, TrOCRBackend
 from ocr.layout import BBox, detect_regions
 from ocr.layout import Region as LayoutRegion
+from ocr.pages import load_page_images
 from ocr.preprocess import preprocess
+from review_api.metrics import inc as inc_metric
 from storage.db import SessionLocal
 from storage.models import (
     Document,
@@ -55,6 +56,8 @@ from storage.models import (
     ReviewFlag,
 )
 from storage.models import Region as DBRegion
+from storage.paths import processed_image_dest
+from storage.typed_values import parse_amount_from_entity, parse_date_from_entity
 
 if TYPE_CHECKING:
     import numpy as np
@@ -139,9 +142,27 @@ def _run_ocr_with_retry(image: np.ndarray) -> OCRResult:
     return result  # type: ignore[return-value]  # loop always runs >=1 time
 
 
-def _load_page_and_regions(session, document: Document) -> tuple[Page, list[DBRegion]] | None:
+def _advisory_lock_key(document_id: UUID) -> int:
+    return int(document_id.int % (2**63 - 1))
+
+
+def _advisory_lock(session, document_id: UUID) -> None:
+    if session.get_bind().dialect.name != "postgresql":
+        return
+    session.execute(text("SELECT pg_advisory_lock(:k)"), {"k": _advisory_lock_key(document_id)})
+
+
+def _advisory_unlock(session, document_id: UUID) -> None:
+    if session.get_bind().dialect.name != "postgresql":
+        return
+    session.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _advisory_lock_key(document_id)})
+
+
+def _load_page_and_regions(
+    session, document: Document, page_number: int = 1
+) -> tuple[Page, list[DBRegion]] | None:
     page = session.scalar(
-        select(Page).where(Page.document_id == document.id, Page.page_number == 1)
+        select(Page).where(Page.document_id == document.id, Page.page_number == page_number)
     )
     if page is None:
         return None
@@ -153,8 +174,64 @@ def _load_page_and_regions(session, document: Document) -> tuple[Page, list[DBRe
     return page, db_regions
 
 
+def _wait_for_regions(session, document: Document, page_number: int) -> tuple[Page, list[DBRegion]] | None:
+    """A racing winner may have committed the page row before inserting regions."""
+    existing = _load_page_and_regions(session, document, page_number)
+    if existing is None:
+        return None
+    page, db_regions = existing
+    if db_regions:
+        return existing
+    for _ in range(3):
+        time.sleep(0.05)
+        session.expire_all()
+        existing = _load_page_and_regions(session, document, page_number)
+        if existing is None:
+            return None
+        page, db_regions = existing
+        if db_regions:
+            return existing
+    return page, db_regions
+
+
+def _persist_processed_image(
+    session, document: Document, page: Page, image: np.ndarray, page_number: int
+) -> None:
+    dest = processed_image_dest(document.id, page_number)
+    if not cv2.imwrite(str(dest), image):
+        raise ValueError(f"failed to write processed image to {dest}")
+    page.processed_image_path = str(dest)
+    if page_number == 1:
+        document.processed_image_path = str(dest)
+    session.commit()
+
+
+def _flag_empty_layout(session, document: Document, page: Page) -> None:
+    existing = session.scalar(
+        select(func.count())
+        .select_from(ReviewFlag)
+        .where(
+            ReviewFlag.document_id == document.id,
+            ReviewFlag.page_id == page.id,
+            ReviewFlag.flag_type == FlagType.extraction_failure,
+        )
+    )
+    if existing:
+        return
+    session.add(
+        ReviewFlag(
+            document_id=document.id,
+            page_id=page.id,
+            flag_type=FlagType.extraction_failure,
+            severity=FlagSeverity.high,
+            explanation="No layout regions were detected on this page; OCR was skipped.",
+        )
+    )
+    session.commit()
+
+
 def _ensure_page_and_regions(
-    session, document: Document, image: np.ndarray
+    session, document: Document, image: np.ndarray, page_number: int = 1
 ) -> tuple[Page, list[DBRegion], np.ndarray]:
     """Load this document's single page/regions if the pipeline already got
     this far on a prior attempt, otherwise preprocess + detect + persist
@@ -174,19 +251,19 @@ def _ensure_page_and_regions(
     """
     preprocessed = preprocess(image)
 
-    existing = _load_page_and_regions(session, document)
+    existing = _wait_for_regions(session, document, page_number)
     if existing is not None:
         page, db_regions = existing
         return page, db_regions, preprocessed.image
 
     layout_regions = detect_regions(preprocessed.image)
-    page = Page(document_id=document.id, page_number=1)
+    page = Page(document_id=document.id, page_number=page_number)
     session.add(page)
     try:
         session.flush()
     except IntegrityError:
         session.rollback()
-        existing = _load_page_and_regions(session, document)
+        existing = _wait_for_regions(session, document, page_number)
         if existing is None:
             raise  # not actually a duplicate-page race -- some other integrity error
         page, db_regions = existing
@@ -255,17 +332,37 @@ def _run_ocr_stage(
         crop = image[y : y + h, x : x + w]
         result = _run_ocr_with_retry(crop)
 
-        session.add(
-            OCRResultRecord(
-                region_id=region.id,
-                engine=result.engine,
-                text=result.text,
-                confidence=result.document_confidence,
-                status=OCRStatus(result.status),
-                notes=result.notes or None,
-            )
+        record = OCRResultRecord(
+            region_id=region.id,
+            engine=result.engine,
+            text=result.text,
+            confidence=result.document_confidence,
+            status=OCRStatus(result.status),
+            notes=result.notes or None,
         )
-        session.commit()
+        session.add(record)
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            existing = session.scalar(
+                select(OCRResultRecord).where(OCRResultRecord.region_id == region.id)
+            )
+            if existing is None:
+                raise
+            result = OCRResult(
+                text=existing.text,
+                words=[],
+                engine=existing.engine,
+                document_confidence=existing.confidence,
+                line_confidences={},
+                status=existing.status.value,
+                notes=list(existing.notes or []),
+            )
+            logger.info(
+                "region_id=%s lost a concurrent OCR insert race; reusing the winner's result",
+                region.id,
+            )
 
         ocr_results[idx] = result
         if result.status != "ok":
@@ -284,28 +381,6 @@ def _entity_to_extracted(entity: Entity, bbox: BBox) -> ExtractedEntity:
         end_char=entity.end_char,
         region_bbox=bbox,
     )
-
-
-def _parse_date_value(entity: ExtractedEntity) -> date | None:
-    if not entity.normalized_value:
-        return None
-    try:
-        return date.fromisoformat(entity.normalized_value)
-    except ValueError:
-        return None
-
-
-def _parse_amount_value(entity: ExtractedEntity) -> tuple[float | None, str | None]:
-    if not entity.normalized_value:
-        return None, None
-    parts = entity.normalized_value.split(maxsplit=1)
-    if len(parts) != 2:
-        return None, None
-    currency, amount_str = parts
-    try:
-        return float(amount_str), currency
-    except ValueError:
-        return None, None
 
 
 def _run_extraction_stage(
@@ -333,9 +408,9 @@ def _run_extraction_stage(
         )
         db_entities = []
         for e in extracted:
-            date_value = _parse_date_value(e) if e.entity_type == "date" else None
+            date_value = parse_date_from_entity(e) if e.entity_type == "date" else None
             amount_value, amount_currency = (
-                _parse_amount_value(e) if e.entity_type == "amount" else (None, None)
+                parse_amount_from_entity(e) if e.entity_type == "amount" else (None, None)
             )
             db_entity = Entity(
                 region_id=region.id,
@@ -376,7 +451,9 @@ def _run_anomaly_stage(
     db_entities_by_region_idx: dict[int, list[Entity]],
 ) -> int:
     existing_count = session.scalar(
-        select(func.count()).select_from(ReviewFlag).where(ReviewFlag.document_id == document.id)
+        select(func.count())
+        .select_from(ReviewFlag)
+        .where(ReviewFlag.document_id == document.id, ReviewFlag.page_id == page.id)
     )
     if existing_count:
         return existing_count
@@ -435,53 +512,81 @@ def run_pipeline(document_id: str) -> None:
     retry/backoff and marking the document `error` once retries are spent).
     """
     session = SessionLocal()
+    lock_id: UUID | None = None
     try:
         document = session.get(Document, UUID(document_id))
         if document is None:
             raise ValueError(f"document {document_id} not found")
+        lock_id = document.id
+        _advisory_lock(session, lock_id)
 
-        image = cv2.imread(document.raw_image_path)
-        if image is None:
+        try:
+            page_images = load_page_images(document.raw_image_path)
+        except FileNotFoundError:
+            page_images = []
+        if not page_images:
             raise ValueError(f"could not read image at {document.raw_image_path!r}")
 
         document.status = DocumentStatus.preprocessing
         session.commit()
-        with _stage_timer(document_id, "preprocess_and_layout"):
-            page, db_regions, preprocessed_image = _ensure_page_and_regions(session, document, image)
 
-        document.status = DocumentStatus.ocr_running
-        session.commit()
-        with _stage_timer(document_id, "ocr"):
-            any_partial, ocr_results = _run_ocr_stage(session, db_regions, preprocessed_image)
+        total_regions = 0
+        total_flags = 0
+        any_partial = False
+
+        for page_number, image in enumerate(page_images, start=1):
+            with _stage_timer(document_id, f"preprocess_and_layout_p{page_number}"):
+                page, db_regions, preprocessed_image = _ensure_page_and_regions(
+                    session, document, image, page_number
+                )
+            _persist_processed_image(session, document, page, preprocessed_image, page_number)
+
+            if not db_regions:
+                _flag_empty_layout(session, document, page)
+                total_flags += 1
+                continue
+
+            total_regions += len(db_regions)
+            document.status = DocumentStatus.ocr_running
+            session.commit()
+            with _stage_timer(document_id, f"ocr_p{page_number}"):
+                page_partial, ocr_results = _run_ocr_stage(session, db_regions, preprocessed_image)
+            any_partial = any_partial or page_partial
+
+            document.status = DocumentStatus.extracting
+            session.commit()
+            with _stage_timer(document_id, f"entity_extraction_p{page_number}"):
+                entities_by_region_idx, db_entities_by_region_idx = _run_extraction_stage(
+                    session, db_regions, ocr_results
+                )
+
+            with _stage_timer(document_id, f"indexing_p{page_number}"):
+                _update_page_full_text(session, page, db_regions, ocr_results)
+
+            with _stage_timer(document_id, f"anomaly_flagging_p{page_number}"):
+                total_flags += _run_anomaly_stage(
+                    session, document, page, db_regions, ocr_results,
+                    entities_by_region_idx, db_entities_by_region_idx,
+                )
+
         document.status = DocumentStatus.ocr_partial if any_partial else DocumentStatus.ocr_done
         session.commit()
-
-        document.status = DocumentStatus.extracting
-        session.commit()
-        with _stage_timer(document_id, "entity_extraction"):
-            entities_by_region_idx, db_entities_by_region_idx = _run_extraction_stage(
-                session, db_regions, ocr_results
-            )
-
-        with _stage_timer(document_id, "indexing"):
-            _update_page_full_text(session, page, db_regions, ocr_results)
         document.status = DocumentStatus.indexed
         session.commit()
-
-        with _stage_timer(document_id, "anomaly_flagging"):
-            flag_count = _run_anomaly_stage(
-                session, document, page, db_regions, ocr_results,
-                entities_by_region_idx, db_entities_by_region_idx,
-            )
-
-        document.status = DocumentStatus.needs_review if flag_count else DocumentStatus.ready
+        document.status = DocumentStatus.needs_review if total_flags else DocumentStatus.ready
         session.commit()
+        inc_metric("pipeline_complete")
 
         logger.info(
             "pipeline_complete document_id=%s status=%s regions=%d flags=%d",
-            document_id, document.status.value, len(db_regions), flag_count,
+            document_id, document.status.value, total_regions, total_flags,
         )
     finally:
+        if lock_id is not None:
+            try:
+                _advisory_unlock(session, lock_id)
+            except Exception:
+                logger.exception("failed to release advisory lock for document %s", lock_id)
         session.close()
 
 
@@ -491,6 +596,7 @@ def mark_document_error(document_id: str, error_message: str) -> None:
         document = session.get(Document, UUID(document_id))
         if document is not None:
             document.status = DocumentStatus.error
+            document.error_message = error_message[:4000]
             session.commit()
             logger.error("document_id=%s marked as error: %s", document_id, error_message)
     finally:

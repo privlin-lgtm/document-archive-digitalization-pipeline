@@ -60,6 +60,7 @@ class TestAuth:
         response = client.get("/documents", headers=auth_headers())
         assert response.status_code == 200
         assert response.json()["results"] == []
+        assert response.json()["total"] == 0
 
     def test_get_document_without_token_is_rejected(self, api):
         client, _ = api
@@ -94,6 +95,7 @@ class TestPagination:
 
         assert response.status_code == 200
         assert len(response.json()["results"]) == 2
+        assert response.json()["total"] == 5
 
     def test_offset_skips_earlier_rows(self, api):
         client, TestSession = api

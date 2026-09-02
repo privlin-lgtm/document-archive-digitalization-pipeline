@@ -4,10 +4,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from review_api.auth import require_api_token
+from review_api.principal import AuthPrincipal
 from review_api.rate_limit import enforce_rate_limit
 from review_api.schemas import EntityCorrectionOut, EntityCorrectionRequest
 from storage.db import get_db
-from storage.models import Entity, EntityCorrection
+from storage.models import Entity, EntityCorrection, EntityType
+from storage.typed_values import parse_amount_value, parse_date_value
 
 router = APIRouter(
     prefix="/entities",
@@ -17,15 +19,12 @@ router = APIRouter(
 
 
 @router.patch("/{entity_id}", response_model=EntityCorrectionOut)
-def correct_entity(entity_id: UUID, body: EntityCorrectionRequest, db: Session = Depends(get_db)) -> EntityCorrectionOut:
-    """Record a human correction of an extracted entity's value.
-
-    `entity.raw_text` (the original OCR output) is never modified.
-    `entity.normalized_value` is updated to the corrected value so
-    downstream search/queries see the current best value, and the
-    correction is appended to `entity_corrections` — a full audit trail,
-    not an overwrite — recording what the value was before this change.
-    """
+def correct_entity(
+    entity_id: UUID,
+    body: EntityCorrectionRequest,
+    db: Session = Depends(get_db),
+    principal: AuthPrincipal = Depends(require_api_token),
+) -> EntityCorrectionOut:
     entity = db.get(Entity, entity_id)
     if entity is None:
         raise HTTPException(status_code=404, detail="entity not found")
@@ -35,9 +34,15 @@ def correct_entity(entity_id: UUID, body: EntityCorrectionRequest, db: Session =
         entity_id=entity.id,
         original_value=original_value,
         corrected_value=body.corrected_value,
-        reviewer=body.reviewer,
+        reviewer=principal.reviewer,
     )
     entity.normalized_value = body.corrected_value
+    if entity.entity_type == EntityType.date:
+        entity.date_value = parse_date_value(body.corrected_value)
+    elif entity.entity_type == EntityType.amount:
+        amount, currency = parse_amount_value(body.corrected_value)
+        entity.amount_value = amount
+        entity.amount_currency = currency
 
     db.add(correction)
     db.commit()

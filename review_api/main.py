@@ -4,33 +4,50 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import get_settings
-from review_api import documents, entities, health, review_flags, search, stats
+from review_api import (
+    auth_routes,
+    documents,
+    entities,
+    health,
+    metrics,
+    review_flags,
+    search,
+    stats,
+)
+from review_api.request_id import RequestIdMiddleware
+
+settings = get_settings()
 
 logging.basicConfig(
-    level=get_settings().log_level,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    level=settings.log_level,
+    format="%(asctime)s %(levelname)s %(name)s request_id=%(request_id)s: %(message)s"
+    if False
+    else "%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
-app = FastAPI(title="Document Archive Pipeline", version="0.1.0")
+_docs = None if settings.app_env == "production" else "/docs"
+_openapi = None if settings.app_env == "production" else "/openapi.json"
 
-# Lets the web/ annotation UI (a separate-origin dev server / static host)
-# call this API from a browser. The bearer token still gates every request
-# beyond /health — CORS only controls which origins the browser lets through,
-# not authorization. Methods/headers are the actual set this API uses, not
-# a wildcard — there's no reason a browser should be allowed to preflight
-# e.g. DELETE against an API that never defines one.
+app = FastAPI(
+    title="Document Archive Pipeline",
+    version="0.1.0",
+    docs_url=_docs,
+    redoc_url=None if settings.app_env == "production" else "/redoc",
+    openapi_url=_openapi,
+)
+
+app.add_middleware(RequestIdMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=get_settings().cors_allowed_origins,
+    allow_origins=settings.cors_allowed_origins,
     allow_methods=["GET", "POST", "PATCH"],
     allow_headers=["Authorization", "Content-Type"],
+    allow_credentials=True,
 )
 
-# Rate limiting (review_api.rate_limit.enforce_rate_limit) is wired in per
-# router, alongside require_api_token, rather than as global middleware —
-# see rate_limit.py's docstring for why. /health and /health/ready simply
-# don't carry the dependency, so they're exempt without any special-casing.
 app.include_router(health.router)
+app.include_router(auth_routes.router)
+app.include_router(metrics.router)
 app.include_router(documents.router)
 app.include_router(search.router)
 app.include_router(entities.router)

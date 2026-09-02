@@ -1,21 +1,35 @@
 from types import SimpleNamespace
 
+import cv2
+import numpy as np
 import pytest
 
 from ingestion import batch
-from storage.models import Document
+from storage.models import Document, DocumentStatus
 
 
 def fake_settings(**overrides) -> SimpleNamespace:
-    base = {"storage_backend": "local", "storage_local_path": "", "max_upload_size_bytes": 50 * 1024 * 1024}
+    base = {
+        "storage_backend": "local",
+        "storage_local_path": "",
+        "max_upload_size_bytes": 50 * 1024 * 1024,
+        "max_image_pixels": 40_000_000,
+    }
     base.update(overrides)
     return SimpleNamespace(**base)
+
+
+def write_png(path, width: int = 20, height: int = 20) -> None:
+    image = np.full((height, width), 255, dtype=np.uint8)
+    assert cv2.imwrite(str(path), image)
 
 
 @pytest.fixture()
 def batch_env(monkeypatch, sqlite_session_factory, tmp_path):
     monkeypatch.setattr(batch, "SessionLocal", sqlite_session_factory)
-    monkeypatch.setattr("ingestion.upload.get_settings", lambda: fake_settings(storage_local_path=str(tmp_path)))
+    settings = fake_settings(storage_local_path=str(tmp_path))
+    monkeypatch.setattr("ingestion.upload.get_settings", lambda: settings)
+    monkeypatch.setattr("ingestion.validate.get_settings", lambda: settings)
     enqueued: list[str] = []
     monkeypatch.setattr(batch.run_ocr_job, "delay", lambda document_id: enqueued.append(document_id))
     return sqlite_session_factory, enqueued
@@ -44,7 +58,7 @@ class TestIngestOne:
     def test_creates_document_row_and_enqueues_pipeline_job(self, batch_env, tmp_path):
         session_factory, enqueued = batch_env
         image_path = tmp_path / "scan.png"
-        image_path.write_bytes(b"fake-image-bytes")
+        write_png(image_path)
 
         document_id = batch.ingest_one(image_path)
 
@@ -63,13 +77,15 @@ class TestIngestOne:
 
         monkeypatch.setattr(batch.run_ocr_job, "delay", broken_delay)
         image_path = tmp_path / "scan.png"
-        image_path.write_bytes(b"fake-image-bytes")
+        write_png(image_path)
 
         document_id = batch.ingest_one(image_path)
 
         assert document_id is not None
         session = session_factory()
-        assert session.get(Document, document_id) is not None
+        document = session.get(Document, document_id)
+        assert document is not None
+        assert document.status == DocumentStatus.enqueue_failed
 
     def test_oversized_file_is_skipped_not_raised(self, batch_env, tmp_path, monkeypatch):
         monkeypatch.setattr(
@@ -88,7 +104,7 @@ class TestIngestDirectory:
     def test_ingests_every_discovered_image(self, batch_env, tmp_path):
         _session_factory, enqueued = batch_env
         for i in range(5):
-            (tmp_path / f"scan-{i}.png").write_bytes(b"x")
+            write_png(tmp_path / f"scan-{i}.png")
 
         ingested = batch.ingest_directory(tmp_path, concurrency=2)
 
@@ -110,7 +126,7 @@ class TestIngestDirectory:
         session_factory, enqueued = batch_env
         count = 12
         for i in range(count):
-            (tmp_path / f"scan-{i}.png").write_bytes(f"content-{i}".encode())
+            write_png(tmp_path / f"scan-{i}.png")
 
         ingested = batch.ingest_directory(tmp_path, concurrency=8)
 

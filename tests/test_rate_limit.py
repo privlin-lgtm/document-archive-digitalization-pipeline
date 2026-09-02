@@ -83,7 +83,20 @@ class TestEnforceRateLimit:
 
         monkeypatch.setattr(rate_limit, "_get_redis_client", broken)
 
-        await rate_limit.enforce_rate_limit(_make_request())  # must not raise
+        await rate_limit.enforce_rate_limit(_make_request())  # GET still fails open
+
+    async def test_mutating_requests_fail_closed_when_configured(self, monkeypatch):
+        def broken():
+            raise redis.exceptions.ConnectionError("refused")
+
+        monkeypatch.setattr(rate_limit, "_get_redis_client", broken)
+        monkeypatch.setattr(settings, "rate_limit_fail_closed_mutating", True)
+
+        request = _make_request()
+        request.scope["method"] = "POST"
+        with pytest.raises(HTTPException) as exc_info:
+            await rate_limit.enforce_rate_limit(request)
+        assert exc_info.value.status_code == 503
 
     async def test_a_redis_failure_opens_the_circuit_so_the_next_call_skips_the_connection_attempt(
         self, monkeypatch

@@ -13,15 +13,22 @@ export type DocumentStatus =
   | "extracting"
   | "indexed"
   | "needs_review"
+  | "ready"
+  | "enqueue_failed"
   | "error";
 export type FlagType = "low_ocr_confidence" | "illegible" | "entity_conflict" | "extraction_failure";
 export type FlagSeverity = "low" | "medium" | "high";
 export type ReviewFlagStatus = "open" | "resolved" | "dismissed";
 
+export interface SessionOut {
+  reviewer: string;
+}
+
 export interface DocumentCreated {
   id: string;
   filename: string;
   status: string;
+  enqueued?: boolean;
 }
 
 export interface DocumentSummary {
@@ -35,6 +42,7 @@ export interface DocumentListResponse {
   results: DocumentSummary[];
   limit: number;
   offset: number;
+  total: number;
 }
 
 export interface OCRResultOut {
@@ -104,7 +112,7 @@ export interface DocumentDetail {
   filename: string;
   upload_time: string;
   status: DocumentStatus;
-  raw_image_path: string;
+  error_message?: string | null;
   pages: PageOut[];
   flags: ReviewFlagOut[];
 }
@@ -139,7 +147,6 @@ export interface SearchFilters {
 
 export interface EntityCorrectionRequest {
   corrected_value: string;
-  reviewer: string;
 }
 
 export interface EntityCorrectionOut {

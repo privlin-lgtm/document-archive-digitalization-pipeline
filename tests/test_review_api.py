@@ -50,9 +50,15 @@ def api(sqlite_session_factory, tmp_path, monkeypatch):
 
     # Uploads write under a disposable temp dir instead of the real storage path.
     fake_settings = SimpleNamespace(
-        storage_backend="local", storage_local_path=str(tmp_path), max_upload_size_bytes=50 * 1024 * 1024
+        storage_backend="local",
+        storage_local_path=str(tmp_path),
+        max_upload_size_bytes=50 * 1024 * 1024,
+        max_image_pixels=40_000_000,
+        max_files_per_upload=get_settings().max_files_per_upload,
     )
     monkeypatch.setattr("ingestion.upload.get_settings", lambda: fake_settings)
+    monkeypatch.setattr("ingestion.validate.get_settings", lambda: fake_settings)
+    monkeypatch.setattr("storage.paths.get_settings", lambda: fake_settings)
 
     try:
         yield TestClient(app), sqlite_session_factory, tmp_path, enqueued
@@ -162,6 +168,9 @@ class TestUploadDocuments:
             "/documents", headers=auth_headers(), files={"files": ("scan.png", make_png_bytes(), "image/png")}
         )
         assert response.status_code == 201
+        body = response.json()[0]
+        assert body["status"] == "enqueue_failed"
+        assert body["enqueued"] is False
 
     def test_rejects_oversized_upload(self, api, monkeypatch):
         client, *_ = api
@@ -286,9 +295,9 @@ class TestGetDocumentImage:
         assert response.status_code == 404
 
     def test_missing_file_on_disk_is_404(self, api):
-        client, session_factory, *_ = api
+        client, session_factory, tmp_path, _ = api
         session = session_factory()
-        document = Document(filename="ghost.png", status=DocumentStatus.uploaded, raw_image_path="/nowhere/ghost.png")
+        document = Document(filename="ghost.png", status=DocumentStatus.uploaded, raw_image_path=str(tmp_path / "ghost.png"))
         session.add(document)
         session.commit()
         document_id = str(document.id)
@@ -296,6 +305,22 @@ class TestGetDocumentImage:
 
         response = client.get(f"/documents/{document_id}/image", headers=auth_headers())
         assert response.status_code == 404
+
+    def test_path_outside_storage_root_is_rejected(self, api):
+        client, session_factory, *_ = api
+        session = session_factory()
+        document = Document(
+            filename="escape.png",
+            status=DocumentStatus.uploaded,
+            raw_image_path="/etc/passwd",
+        )
+        session.add(document)
+        session.commit()
+        document_id = str(document.id)
+        session.close()
+
+        response = client.get(f"/documents/{document_id}/image", headers=auth_headers())
+        assert response.status_code == 403
 
     def test_serves_plain_image(self, api):
         client, session_factory, tmp_path, _ = api
@@ -372,7 +397,7 @@ class TestCorrectEntity:
         body = response.json()
         assert body["original_value"] == "John Smith"
         assert body["corrected_value"] == "John A. Smith"
-        assert body["reviewer"] == "alice@example.com"
+        assert body["reviewer"] == "service-account"
 
         session = session_factory()
         entity = session.get(Entity, uuid.UUID(ids["entity_id"]))
@@ -400,6 +425,56 @@ class TestCorrectEntity:
         session = session_factory()
         corrections = session.query(EntityCorrection).all()
         assert len(corrections) == 2
+        session.close()
+
+    def test_session_reviewer_cannot_be_spoofed_in_the_body(self, api):
+        client, session_factory, *_ = api
+        ids = seed_document_with_page_region(session_factory)
+        client.post(
+            "/auth/login",
+            json={"reviewer": "paul@archive", "password": get_settings().review_api_token},
+        )
+        response = client.patch(
+            f"/entities/{ids['entity_id']}",
+            json={"corrected_value": "Jonathan Smith", "reviewer": "mallory"},
+        )
+        assert response.status_code == 200
+        assert response.json()["reviewer"] == "paul@archive"
+
+    def test_date_correction_updates_typed_column(self, api):
+        client, session_factory, *_ = api
+        session = session_factory()
+        document = Document(filename="d.png", status=DocumentStatus.indexed, raw_image_path="/x/d.png")
+        session.add(document)
+        session.flush()
+        page = Page(document_id=document.id, page_number=1)
+        session.add(page)
+        session.flush()
+        region = Region(
+            page_id=page.id, bbox_x=1, bbox_y=2, bbox_w=10, bbox_h=10,
+            region_type=RegionType.paragraph, reading_order=0, confidence=0.9,
+        )
+        session.add(region)
+        session.flush()
+        entity = Entity(
+            region_id=region.id, entity_type=EntityType.date, raw_text="3 March 1897",
+            normalized_value="1897-03-03", confidence=0.8, start_char=0, end_char=12,
+        )
+        session.add(entity)
+        session.commit()
+        entity_id = str(entity.id)
+        session.close()
+
+        response = client.patch(
+            f"/entities/{entity_id}",
+            headers=auth_headers(),
+            json={"corrected_value": "1897-04-01"},
+        )
+        assert response.status_code == 200
+
+        session = session_factory()
+        updated = session.get(Entity, uuid.UUID(entity_id))
+        assert str(updated.date_value) == "1897-04-01"
         session.close()
 
 

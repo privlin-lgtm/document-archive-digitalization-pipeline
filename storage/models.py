@@ -31,6 +31,7 @@ class DocumentStatus(str, enum.Enum):
     indexed = "indexed"
     needs_review = "needs_review"
     ready = "ready"
+    enqueue_failed = "enqueue_failed"
     error = "error"
 
 
@@ -48,6 +49,8 @@ class Document(Base):
         nullable=False,
     )
     raw_image_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    processed_image_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     pages: Mapped[list["Page"]] = relationship(back_populates="document", cascade="all, delete-orphan")
     review_flags: Mapped[list["ReviewFlag"]] = relationship(
@@ -78,6 +81,7 @@ class Page(Base):
         nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
+    processed_image_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
 
     document: Mapped[Document] = relationship(back_populates="pages")
     regions: Mapped[list["Region"]] = relationship(back_populates="page", cascade="all, delete-orphan")

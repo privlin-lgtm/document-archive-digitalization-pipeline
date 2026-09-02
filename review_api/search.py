@@ -22,7 +22,7 @@ MAX_LIMIT = 200
 
 @router.get("", response_model=SearchResponse)
 def search(
-    q: str = Query(..., min_length=1, description="Full-text search query"),
+    q: str = Query(..., min_length=1, max_length=500, description="Full-text search query"),
     date_from: date | None = Query(None, description="Only pages that also mention a date on/after this"),
     date_to: date | None = Query(None, description="Only pages that also mention a date on/before this"),
     entity_type: EntityType | None = Query(None, description="Only pages with at least one entity of this type"),

@@ -19,6 +19,7 @@ export function useDocumentImage(documentId: string | undefined, annotate: boole
     let cancelled = false;
     let objectUrl: string | null = null;
 
+    setImageUrl(null);
     setIsLoading(true);
     setError(null);
     api

@@ -54,3 +54,8 @@ class TestProductionConfigGuard:
             cors_allowed_origins=["https://review.example.com"],
         )
         assert settings.app_env == "production"
+        assert settings.rate_limit_fail_closed_mutating is True
+
+    def test_development_rate_limit_fails_open_by_default(self):
+        settings = Settings(**BASE_KWARGS, app_env="development")
+        assert settings.rate_limit_fail_closed_mutating is False

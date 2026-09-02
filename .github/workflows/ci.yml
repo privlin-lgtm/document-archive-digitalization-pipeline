@@ -22,6 +22,15 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       # A real Postgres so the Postgres-gated tests (tsvector/pg_trgm/BRIN
       # -- see test_queries.py, test_review_api.py's search tests) run in
@@ -30,6 +39,7 @@ jobs:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/document_archive
       REVIEW_API_TOKEN: ci-test-token-not-a-real-secret-000000000000
       APP_ENV: development
+      RATE_LIMIT_REDIS_URL: redis://localhost:6379/2
     steps:
       - uses: actions/checkout@v4
 
@@ -70,4 +80,5 @@ jobs:
 
       - run: npm ci
       - run: npm run lint
+      - run: npm test
       - run: npm run build

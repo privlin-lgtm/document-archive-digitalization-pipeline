@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     # (independent of per-file size) -- without this, one request could
     # enqueue an unbounded number of pipeline jobs.
     max_files_per_upload: int = 20
+    # Reject decoded images above this many pixels (decompression-bomb cap).
+    max_image_pixels: int = 40_000_000
+    # When True (production default), Redis rate-limit failures reject
+    # mutating requests instead of failing open.
+    rate_limit_fail_closed_mutating: bool | None = None
+    # Comma-separated CIDRs or "any" of reverse proxies allowed to set
+    # X-Forwarded-For. Empty means use request.client.host only.
+    trusted_proxy_ips: list[str] = Field(default_factory=list)
 
     # Celery / broker
     celery_broker_url: str = "redis://localhost:6379/0"
@@ -113,6 +121,12 @@ class Settings(BaseSettings):
                 "CORS_ALLOWED_ORIGINS contains '*' in a production environment "
                 "(APP_ENV=production) -- list the actual allowed origins explicitly."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _default_rate_limit_fail_closed(self) -> "Settings":
+        if self.rate_limit_fail_closed_mutating is None:
+            object.__setattr__(self, "rate_limit_fail_closed_mutating", self.app_env == "production")
         return self
 
 
