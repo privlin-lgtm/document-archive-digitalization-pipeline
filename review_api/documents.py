@@ -5,13 +5,16 @@ from pathlib import Path
 from uuid import UUID
 
 import cv2
+import numpy as np
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from config import get_settings
 from ingestion.upload import UnsafeFilenameError, UploadTooLargeError, save_raw_image
 from review_api.auth import require_api_token
+from review_api.rate_limit import enforce_rate_limit
 from review_api.schemas import (
     DocumentCreated,
     DocumentDetail,
@@ -29,7 +32,11 @@ from worker import run_ocr_job
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/documents", tags=["documents"], dependencies=[Depends(require_api_token)])
+router = APIRouter(
+    prefix="/documents",
+    tags=["documents"],
+    dependencies=[Depends(enforce_rate_limit), Depends(require_api_token)],
+)
 
 DEFAULT_PAGE_LIMIT = 50
 MAX_PAGE_LIMIT = 500
@@ -57,9 +64,38 @@ async def upload_documents(
     later — but is logged loudly since it means that document will silently
     never get processed otherwise.
     """
+    settings = get_settings()
+    if len(files) > settings.max_files_per_upload:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"{len(files)} files exceeds the {settings.max_files_per_upload}-file "
+                "limit per upload request"
+            ),
+        )
+
     created: list[Document] = []
     for upload in files:
         content = await upload.read()
+
+        # Reject anything that isn't a real, decodable image *before* it's
+        # ever written to disk or handed to the pipeline -- filename
+        # sanitization alone doesn't stop someone from uploading an
+        # arbitrary file (a script, an archive, garbage bytes) under an
+        # innocuous-looking name. cv2.imdecode raises (rather than
+        # returning None, its behavior for any other malformed input) on a
+        # genuinely empty buffer, so that case is checked separately first.
+        decoded = (
+            cv2.imdecode(np.frombuffer(content, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+            if content
+            else None
+        )
+        if decoded is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{upload.filename or 'upload'!r} is not a readable image",
+            )
+
         document_id = uuid.uuid4()
         try:
             raw_image_path = save_raw_image(document_id, upload.filename or "upload", content)

@@ -15,6 +15,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2g
 
   redis:
     image: redis:7-alpine
@@ -24,6 +29,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
 
   app:
     build: .
@@ -33,6 +43,7 @@ services:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/document_archive
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
+      RATE_LIMIT_REDIS_URL: redis://redis:6379/2
     ports:
       - "8000:8000"
     depends_on:
@@ -42,6 +53,17 @@ services:
         condition: service_healthy
     volumes:
       - document_data:/data/documents
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2g
 
   worker:
     build: .
@@ -59,6 +81,20 @@ services:
         condition: service_healthy
     volumes:
       - document_data:/data/documents
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A worker.celery_app inspect ping --timeout 5 | grep -q OK"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          # OCR/NLP work is CPU- and memory-heavy (spaCy models, Tesseract,
+          # optionally TrOCR) -- this is the service most likely to need
+          # raising in a real deployment; tune to the actual scan volume.
+          cpus: "4"
+          memory: 4g
 
 volumes:
   db_data:

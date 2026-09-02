@@ -1,0 +1,9 @@
+# Force LF line endings on checkout, regardless of the cloning machine's
+# git config (core.autocrlf) or OS. Without this, a Windows clone with
+# autocrlf=true checks text files out with CRLF, and Docker's `COPY` bakes
+# that straight into the Linux image -- for docker-entrypoint.sh
+# specifically, a CRLF shebang line (`#!/bin/sh` + \r\n) fails to execute
+# at all inside the container. Everything in this repo either runs inside
+# a Linux container or is read by tools that don't care about line endings
+# either way, so there's no case where CRLF is actually wanted here.
+* text=auto eol=lf

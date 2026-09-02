@@ -6,6 +6,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from review_api.auth import require_api_token
+from review_api.rate_limit import enforce_rate_limit
 from review_api.schemas import (
     ReviewFlagListResponse,
     ReviewFlagOut,
@@ -15,7 +16,11 @@ from review_api.schemas import (
 from storage.db import get_db
 from storage.models import Document, FlagSeverity, ReviewFlag, ReviewFlagStatus
 
-router = APIRouter(prefix="/review_flags", tags=["review_flags"], dependencies=[Depends(require_api_token)])
+router = APIRouter(
+    prefix="/review_flags",
+    tags=["review_flags"],
+    dependencies=[Depends(enforce_rate_limit), Depends(require_api_token)],
+)
 
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 500

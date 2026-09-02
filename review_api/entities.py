@@ -4,11 +4,16 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from review_api.auth import require_api_token
+from review_api.rate_limit import enforce_rate_limit
 from review_api.schemas import EntityCorrectionOut, EntityCorrectionRequest
 from storage.db import get_db
 from storage.models import Entity, EntityCorrection
 
-router = APIRouter(prefix="/entities", tags=["entities"], dependencies=[Depends(require_api_token)])
+router = APIRouter(
+    prefix="/entities",
+    tags=["entities"],
+    dependencies=[Depends(enforce_rate_limit), Depends(require_api_token)],
+)
 
 
 @router.patch("/{entity_id}", response_model=EntityCorrectionOut)

@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,16 +23,34 @@ class Settings(BaseSettings):
     # accuracy (much larger install: torch + spacy-transformers + ~500MB model).
     ner_model: str = "en_core_web_sm"
 
-    # Storage backend for raw/processed images
+    # Storage backend for raw/processed images. `s3` is a selectable value
+    # but not implemented yet (ingestion.upload.save_raw_image raises
+    # NotImplementedError) -- the validator below fails at settings-load
+    # time (app startup), not on the first upload request, so a
+    # misconfiguration is caught immediately rather than after real traffic
+    # has already tried to use it.
     storage_backend: Literal["local", "s3"] = "local"
     storage_local_path: str = "./data/documents"
     storage_s3_bucket: str | None = None
     storage_s3_region: str | None = None
     max_upload_size_bytes: int = 50 * 1024 * 1024  # 50 MB
+    # Caps the number of files accepted in a single POST /documents request
+    # (independent of per-file size) -- without this, one request could
+    # enqueue an unbounded number of pipeline jobs.
+    max_files_per_upload: int = 20
 
     # Celery / broker
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"
+
+    # API rate limiting (review_api.main) -- a separate Redis DB index from
+    # the Celery broker/result-backend above, so rate-limit keys never
+    # collide with queue/result data even when all three point at the same
+    # Redis instance (the common case, per docker-compose.yml). One uniform
+    # limit for every route (see review_api/rate_limit.py's docstring for
+    # why a per-route stricter limit on uploads was tried and dropped).
+    rate_limit_redis_url: str = "redis://localhost:6379/2"
+    rate_limit_default: str = "60/minute"
 
     # Anomaly/review-flag thresholds (extraction/anomalies.py) — configurable
     # rather than hardcoded, since the "right" threshold depends on the
@@ -57,6 +75,45 @@ class Settings(BaseSettings):
     # App
     app_env: Literal["development", "staging", "production"] = "development"
     log_level: str = "INFO"
+
+    @model_validator(mode="after")
+    def _reject_unimplemented_storage_backend(self) -> "Settings":
+        if self.storage_backend == "s3":
+            raise ValueError(
+                "STORAGE_BACKEND=s3 is not implemented yet (ingestion.upload.save_raw_image "
+                "only handles 'local') -- set STORAGE_BACKEND=local, or implement S3 support "
+                "before deploying with this setting."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _reject_insecure_production_config(self) -> "Settings":
+        """Fails app startup rather than letting an obviously-unsafe config
+        (checked-in local-dev defaults, a trivially short token) reach
+        production silently -- these are exactly the kind of thing a code
+        comment saying "change this before deploying" doesn't actually
+        enforce.
+        """
+        if self.app_env != "production":
+            return self
+
+        if "postgres:postgres@" in self.database_url:
+            raise ValueError(
+                "DATABASE_URL still uses the local-dev default postgres/postgres credentials "
+                "in a production environment (APP_ENV=production) -- rotate them first."
+            )
+        if len(self.review_api_token) < 32:
+            raise ValueError(
+                "REVIEW_API_TOKEN is shorter than 32 characters in a production environment "
+                "(APP_ENV=production) -- generate a proper one: "
+                "python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+            )
+        if any(origin.strip() == "*" for origin in self.cors_allowed_origins):
+            raise ValueError(
+                "CORS_ALLOWED_ORIGINS contains '*' in a production environment "
+                "(APP_ENV=production) -- list the actual allowed origins explicitly."
+            )
+        return self
 
 
 @lru_cache

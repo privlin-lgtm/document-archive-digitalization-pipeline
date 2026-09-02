@@ -3,6 +3,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from review_api.auth import require_api_token
+from review_api.rate_limit import enforce_rate_limit
 from review_api.schemas import StatsResponse
 from storage.db import get_db
 from storage.models import (
@@ -14,7 +15,11 @@ from storage.models import (
     ReviewFlagStatus,
 )
 
-router = APIRouter(prefix="/stats", tags=["stats"], dependencies=[Depends(require_api_token)])
+router = APIRouter(
+    prefix="/stats",
+    tags=["stats"],
+    dependencies=[Depends(enforce_rate_limit), Depends(require_api_token)],
+)
 
 
 @router.get("", response_model=StatsResponse)

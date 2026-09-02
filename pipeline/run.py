@@ -32,6 +32,7 @@ from uuid import UUID
 
 import cv2
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from extraction.anomalies import detect_all_anomalies
 from extraction.entities import ExtractedEntity, extract_entities
@@ -70,14 +71,41 @@ OCR_RETRY_BACKOFF_SECONDS = 2.0
 _router: OCRRouter | None = None
 
 
+def _handwriting_backend_available() -> bool:
+    try:
+        import torch  # noqa: F401
+        import transformers  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def _get_router() -> OCRRouter:
     """Lazily built, module-level: TrOCRBackend defers loading its model
     weights until first use, so constructing it here is cheap, and reusing
     one router avoids reloading the (optional, heavy) handwriting model on
     every call.
+
+    OCRRouter already logs a warning *per call* when it falls back from an
+    unavailable primary backend (see ocr.engine), but that's easy to miss
+    in a busy log stream and says nothing about *why* it's unavailable. If
+    the `handwriting` extra (torch/transformers) isn't installed -- which
+    it isn't by default; it's a large optional dependency -- every
+    handwritten region in every document this worker ever processes
+    silently downgrades to the typed-text backend for the process's entire
+    lifetime. That's worth one loud, explicit warning at startup, not
+    something an operator has to notice by pattern-matching per-call logs.
     """
     global _router
     if _router is None:
+        if not _handwriting_backend_available():
+            logger.warning(
+                "handwriting OCR is disabled for this worker process: the 'torch'/"
+                "'transformers' packages (the 'handwriting' extra) aren't installed. "
+                "Every region classified as handwritten will fall back to the typed-text "
+                "backend (Tesseract) instead. If this archive contains handwritten "
+                "material, install with `uv sync --extra handwriting` -- see README.md."
+            )
         _router = OCRRouter(typed_backend=TesseractBackend(), handwriting_backend=TrOCRBackend())
     return _router
 
@@ -111,6 +139,20 @@ def _run_ocr_with_retry(image: np.ndarray) -> OCRResult:
     return result  # type: ignore[return-value]  # loop always runs >=1 time
 
 
+def _load_page_and_regions(session, document: Document) -> tuple[Page, list[DBRegion]] | None:
+    page = session.scalar(
+        select(Page).where(Page.document_id == document.id, Page.page_number == 1)
+    )
+    if page is None:
+        return None
+    db_regions = list(
+        session.scalars(
+            select(DBRegion).where(DBRegion.page_id == page.id).order_by(DBRegion.reading_order)
+        ).all()
+    )
+    return page, db_regions
+
+
 def _ensure_page_and_regions(
     session, document: Document, image: np.ndarray
 ) -> tuple[Page, list[DBRegion], np.ndarray]:
@@ -119,24 +161,40 @@ def _ensure_page_and_regions(
     them now. Bbox coordinates are only valid against the *preprocessed*
     image (deskew/auto_crop change dimensions), so callers must crop from
     the returned image, never the raw one.
+
+    Two pipeline runs for the *same* document can race here -- Celery's
+    default delivery is at-least-once, so a broker redelivery (e.g. after a
+    visibility-timeout hiccup) can start a second run_pipeline() call while
+    the first is still in flight. Both would see no existing page from the
+    SELECT above and both attempt to create one; `pages` has a unique
+    (document_id, page_number) constraint, so the loser's flush raises
+    IntegrityError instead of silently duplicating data. That's caught
+    below and treated as "someone else already did this" rather than a
+    fatal error.
     """
     preprocessed = preprocess(image)
 
-    page = session.scalar(
-        select(Page).where(Page.document_id == document.id, Page.page_number == 1)
-    )
-    if page is not None:
-        db_regions = list(
-            session.scalars(
-                select(DBRegion).where(DBRegion.page_id == page.id).order_by(DBRegion.reading_order)
-            ).all()
-        )
+    existing = _load_page_and_regions(session, document)
+    if existing is not None:
+        page, db_regions = existing
         return page, db_regions, preprocessed.image
 
     layout_regions = detect_regions(preprocessed.image)
     page = Page(document_id=document.id, page_number=1)
     session.add(page)
-    session.flush()
+    try:
+        session.flush()
+    except IntegrityError:
+        session.rollback()
+        existing = _load_page_and_regions(session, document)
+        if existing is None:
+            raise  # not actually a duplicate-page race -- some other integrity error
+        page, db_regions = existing
+        logger.info(
+            "document_id=%s lost a concurrent page-creation race; reusing the winner's page %s",
+            document.id, page.id,
+        )
+        return page, db_regions, preprocessed.image
 
     db_regions = []
     for lr in layout_regions:

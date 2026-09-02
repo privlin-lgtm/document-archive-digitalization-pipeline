@@ -307,6 +307,7 @@ tests/         pytest suite (backend)
 alembic/       DB migrations
 scripts/       synthetic data seeding (scale) + pipeline smoke test (correctness)
 eval/          OCR/extraction quality evaluation harness (see eval/README.md)
+.github/       CI (lint + pytest against a real Postgres, web/ build) -- workflows/ci.yml
 config.py      pydantic-settings config, read from .env
 worker.py      Celery app + task definitions for async pipeline jobs
 ```
@@ -322,10 +323,14 @@ worker.py      Celery app + task definitions for async pipeline jobs
 
 ```bash
 cp .env.example .env
-uv sync
+uv sync --extra dev
 uv run alembic upgrade head
 uv run uvicorn review_api.main:app --reload
 ```
+
+`--extra dev` pulls in pytest/ruff/httpx (`[project.optional-dependencies].dev`
+in pyproject.toml) — plain `uv sync` alone only installs the runtime
+dependencies, and `uv run pytest` below would fail without it.
 
 Run tests:
 
@@ -341,18 +346,31 @@ docker compose up --build
 ```
 
 This starts Postgres, Redis, the FastAPI app (`app`), and a Celery worker
-(`worker`) for async OCR jobs. Once the `db` service is healthy, run
-migrations against it:
+(`worker`) for async OCR jobs. Both `app` and `worker` run as a non-root
+user in the image, and have CPU/memory limits set in docker-compose.yml
+(`worker`'s is the one most likely to need raising for a real archive's
+scan volume — OCR/NLP is the CPU/memory-heavy part of this stack). Once
+the `db` service is healthy, run migrations against it:
 
 ```bash
 docker compose exec app uv run alembic upgrade head
 ```
 
-Health check (open, no auth needed):
+Health checks (open, no auth needed):
 
 ```bash
-curl http://localhost:8000/health
+curl http://localhost:8000/health         # liveness -- is the process up
+curl http://localhost:8000/health/ready   # readiness -- can it reach Postgres (503 if not)
 ```
+
+`/health` is what docker-compose's own HEALTHCHECK polls; `/health/ready`
+is there for a real load balancer/orchestrator that wants to know whether
+to route traffic here, not just whether the process is alive.
+
+Every other route is both bearer-token-gated (see Configuration below) and
+rate-limited per client IP (`review_api.rate_limit`, default 60 requests/
+minute per route, configurable, fails open if its Redis is unreachable
+rather than taking the whole API down).
 
 `/documents*` requires a bearer token (see Configuration below):
 
@@ -379,16 +397,34 @@ have no default and the app fails fast at startup if they're unset:
   (`/health` stays open for container healthchecks). Generate one with
   `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
 
+`APP_ENV=production` additionally *enforces* both of the above at startup
+(`config.Settings`'s own validator, not just this doc) — the app refuses to
+boot with the default `postgres`/`postgres` credentials, a
+`REVIEW_API_TOKEN` under 32 characters, or `CORS_ALLOWED_ORIGINS` containing
+a literal `"*"`, rather than accepting an obviously-unsafe config silently.
+`STORAGE_BACKEND=s3` is rejected at startup unconditionally, in any
+environment — it's a selectable config value but not actually implemented
+yet (`ingestion.upload.save_raw_image` only handles `local`).
+
 Everything else has a sane default:
 
 - `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` / `DB_POOL_RECYCLE_SECONDS` — SQLAlchemy
   connection pool tuning
 - `OCR_ENGINE` — `tesseract` | `trocr` | `textract`
-- `STORAGE_BACKEND` — `local` | `s3`, plus `STORAGE_LOCAL_PATH` /
+- `STORAGE_BACKEND` — `local` | `s3` (see above), plus `STORAGE_LOCAL_PATH` /
   `STORAGE_S3_BUCKET` / `STORAGE_S3_REGION`
-- `MAX_UPLOAD_SIZE_BYTES` — upload size cap enforced by `ingestion.upload`
+- `MAX_UPLOAD_SIZE_BYTES` — per-file upload size cap
+- `MAX_FILES_PER_UPLOAD` — cap on files accepted in one `POST /documents`
+  request (default 20); uploaded content is also checked to be a real,
+  decodable image before it's written to disk or handed to the pipeline
 - `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` — Redis URLs for the async
   job queue
+- `RATE_LIMIT_REDIS_URL` — Redis URL for `review_api.rate_limit` (a
+  separate DB index from the two above by default, so keys never collide);
+  `RATE_LIMIT_DEFAULT` — requests per window per (client IP, route), e.g.
+  `60/minute` (the default). Fails open (logs a warning, lets the request
+  through) if this Redis is unreachable, with a circuit breaker so a
+  prolonged outage costs one connection-timeout, not one per request.
 - `CORS_ALLOWED_ORIGINS` — browser origins allowed to call the API (JSON
   array; defaults to `["http://localhost:5173"]`, the `web/` dev server).
   CORS only gates which origins a *browser* will let through — the bearer
@@ -442,3 +478,74 @@ it does not return the whole table in one response.
   against what was just persisted) — correct for the common case, but two
   entities in the same region with byte-identical raw text could have a
   flag attributed to the wrong one of the pair.
+
+## Security & production hardening
+
+A full production-readiness/security review pass covered auth, rate
+limiting, upload handling, container hardening, CI, and reliability under
+concurrent/degraded conditions. What it found and fixed:
+
+- Bearer-token comparison is constant-time (`secrets.compare_digest`, not
+  `==`) and was already correct before this pass.
+- Per-(client IP, route) rate limiting on every route except `/health*`
+  (`review_api.rate_limit`) — see Configuration above. Note this was
+  genuinely re-implemented, not just added: a first attempt used the
+  `slowapi` library, which turned out to have two real bugs against this
+  project's FastAPI version (documented in `review_api/rate_limit.py`'s
+  module docstring) — caught by testing against a live Redis rather than
+  trusting the library, not by inspection.
+- `POST /documents` validates that uploaded content actually decodes as an
+  image before it's written to disk, and caps both per-file size
+  (pre-existing) and the number of files per request (new).
+- `app`/`worker` run as a non-root container user; both have CPU/memory
+  limits in docker-compose.yml; `app`/`worker` gained Docker healthchecks
+  (`db`/`redis` already had them).
+- `/health/ready` (checks Postgres connectivity, 503 if unreachable) added
+  alongside the existing liveness-only `/health`.
+- `config.Settings` fails fast at startup on `STORAGE_BACKEND=s3`
+  (selectable but not implemented) and, in `APP_ENV=production`, on
+  default DB credentials, a short `REVIEW_API_TOKEN`, or wildcard CORS —
+  see Configuration above.
+- A race between two pipeline runs for the same document (Celery's
+  at-least-once delivery can redeliver a job) creating duplicate `pages`
+  rows is now caught and recovered from instead of crashing the task —
+  see `pipeline.run._ensure_page_and_regions`'s docstring.
+- `.github/workflows/ci.yml`: lint + the full test suite against a real
+  Postgres, plus a `web/` lint+build job, on every push/PR — there was no
+  CI before this pass, so nothing gated a regression from reaching `main`.
+- A genuine SQLite thread-safety bug in the test suite itself (not
+  application code) was found and fixed: `tests/conftest.py`'s shared
+  fixture used to hand every session the same in-memory `:memory:`
+  connection via `StaticPool`, which the stdlib `sqlite3` module doesn't
+  support truly concurrent access to — it now uses a real temp-file-backed
+  database instead, verified stable across repeated runs of the
+  `ThreadPoolExecutor`-based batch-ingestion tests that had been
+  intermittently tripping it.
+
+What was deliberately **not** done, because it needs a product or
+infrastructure decision this pass isn't positioned to make unilaterally:
+
+- **TLS/HTTPS** — this stack has no reverse proxy or cert management;
+  terminate TLS in front of it (a real load balancer, Caddy, nginx) before
+  exposing it beyond a trusted network. Bearer tokens and document images
+  transit in cleartext otherwise.
+- **Real per-user authentication** — there's one shared bearer token for
+  every reviewer, by original design (see stage 8's "assume a single
+  reviewer role for MVP" in `document-archive-pipeline-prompts.md`). One
+  consequence worth naming explicitly: `PATCH /entities/{id}`'s `reviewer`
+  field is client-supplied free text with nothing to verify it against, so
+  the correction audit trail records what a caller *claims* to be, not a
+  verified identity. Fixing this is a real feature (login, sessions,
+  per-user tokens), not a patch.
+- **A real S3 backend** — `storage_backend=s3` now fails fast instead of
+  failing confusingly on first upload, but "local disk" is still the only
+  backend that actually works. No storage retention/quota policy exists
+  either way — every upload accumulates on disk indefinitely.
+- **Full observability** (metrics, tracing, alerting) — logs only. Fine for
+  the current scale, a real gap at archive scale where "which stage is
+  slow on this batch" needs more than log-grepping.
+- **A dependency vulnerability scan** — not run as part of this pass
+  (network-restricted environment). `web/`'s production deps showed 0
+  known vulnerabilities via `npm audit` at the time of this review; the
+  Python side wasn't checked the same way — run `uvx pip-audit` before a
+  real deployment.

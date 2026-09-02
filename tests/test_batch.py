@@ -99,6 +99,28 @@ class TestIngestDirectory:
         ingested = batch.ingest_directory(tmp_path)
         assert ingested == []
 
+    def test_high_concurrency_does_not_drop_or_corrupt_any_ingest(self, batch_env, tmp_path):
+        """Regression test for a real race: with more worker threads than
+        files, each committing to the DB independently and near-
+        simultaneously, a shared-connection SQLite test fixture used to
+        intermittently raise sqlite3.InterfaceError ("bad parameter or
+        other API misuse") -- see tests/conftest.py's sqlite_engine
+        docstring. Every file must still be ingested exactly once.
+        """
+        session_factory, enqueued = batch_env
+        count = 12
+        for i in range(count):
+            (tmp_path / f"scan-{i}.png").write_bytes(f"content-{i}".encode())
+
+        ingested = batch.ingest_directory(tmp_path, concurrency=8)
+
+        assert len(ingested) == count
+        assert len(set(ingested)) == count  # no duplicate/reused ids
+        assert len(enqueued) == count
+
+        session = session_factory()
+        assert session.query(Document).count() == count
+
 
 class TestMainCLI:
     def test_rejects_a_non_directory_argument(self, tmp_path):

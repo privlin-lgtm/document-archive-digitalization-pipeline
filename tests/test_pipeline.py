@@ -214,3 +214,77 @@ class TestErrorHandling:
         session = session_factory()
         document = session.get(Document, document_id)
         assert document.status == DocumentStatus.error
+
+
+class TestConcurrentPipelineRuns:
+    def test_a_racing_page_creation_is_recovered_not_crashed(self, pipeline_env, monkeypatch):
+        """Celery's at-least-once delivery means two run_pipeline() calls
+        for the *same* document can race: both see no existing page, both
+        try to create one, and the loser's flush hits the (document_id,
+        page_number) unique constraint. _ensure_page_and_regions must
+        recover by loading the winner's page, not propagate the
+        IntegrityError and crash the task.
+
+        Simulated deterministically (not via real threads, which would be
+        timing-dependent) by having detect_regions -- called between our
+        own SELECT and our own INSERT -- commit a competing page from a
+        second session first, standing in for "another worker's run
+        finished page creation while ours was still doing layout
+        detection."
+        """
+        document_id, session_factory = pipeline_env
+        real_detect_regions = pipeline_run.detect_regions
+
+        def racing_detect_regions(image):
+            other_session = session_factory()
+            other_session.add(Page(document_id=document_id, page_number=1))
+            other_session.commit()
+            other_session.close()
+            return real_detect_regions(image)
+
+        monkeypatch.setattr(pipeline_run, "detect_regions", racing_detect_regions)
+
+        session = session_factory()
+        document = session.get(Document, document_id)
+        image = cv2.imread(document.raw_image_path)
+
+        page, db_regions, _ = pipeline_run._ensure_page_and_regions(session, document, image)
+
+        assert page is not None
+        assert db_regions == []  # the "winning" page has no regions of its own in this scenario
+
+        pages = session.scalars(select(Page).where(Page.document_id == document_id)).all()
+        assert len(pages) == 1  # exactly one page row survives -- no crash, no duplicate
+
+
+class TestHandwritingBackendWarning:
+    @pytest.fixture(autouse=True)
+    def _reset_router_cache(self, monkeypatch):
+        monkeypatch.setattr(pipeline_run, "_router", None)
+
+    def test_logs_a_warning_when_the_handwriting_extra_is_unavailable(self, monkeypatch, caplog):
+        monkeypatch.setattr(pipeline_run, "_handwriting_backend_available", lambda: False)
+
+        with caplog.at_level("WARNING", logger="pipeline.run"):
+            pipeline_run._get_router()
+
+        assert any("handwriting OCR is disabled" in record.message for record in caplog.records)
+
+    def test_does_not_warn_when_the_handwriting_extra_is_available(self, monkeypatch, caplog):
+        monkeypatch.setattr(pipeline_run, "_handwriting_backend_available", lambda: True)
+
+        with caplog.at_level("WARNING", logger="pipeline.run"):
+            pipeline_run._get_router()
+
+        assert not any("handwriting OCR is disabled" in record.message for record in caplog.records)
+
+    def test_the_warning_is_logged_only_once_per_process(self, monkeypatch, caplog):
+        monkeypatch.setattr(pipeline_run, "_handwriting_backend_available", lambda: False)
+
+        with caplog.at_level("WARNING", logger="pipeline.run"):
+            pipeline_run._get_router()
+            pipeline_run._get_router()
+            pipeline_run._get_router()
+
+        warnings = [r for r in caplog.records if "handwriting OCR is disabled" in r.message]
+        assert len(warnings) == 1

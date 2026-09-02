@@ -4,12 +4,17 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from review_api.auth import require_api_token
+from review_api.rate_limit import enforce_rate_limit
 from review_api.schemas import SearchResponse, SearchResultItem
 from storage import queries
 from storage.db import get_db
 from storage.models import EntityType
 
-router = APIRouter(prefix="/search", tags=["search"], dependencies=[Depends(require_api_token)])
+router = APIRouter(
+    prefix="/search",
+    tags=["search"],
+    dependencies=[Depends(enforce_rate_limit), Depends(require_api_token)],
+)
 
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 200

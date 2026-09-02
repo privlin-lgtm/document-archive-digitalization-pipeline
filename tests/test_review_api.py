@@ -173,6 +173,46 @@ class TestUploadDocuments:
         )
         assert response.status_code == 413
 
+    def test_rejects_non_image_content(self, api):
+        """Filename sanitization alone doesn't stop someone uploading an
+        arbitrary file under an innocuous name -- content must actually
+        decode as an image.
+        """
+        client, session_factory, *_ = api
+        response = client.post(
+            "/documents",
+            headers=auth_headers(),
+            files={"files": ("scan.png", b"#!/bin/sh\necho not an image\n", "image/png")},
+        )
+        assert response.status_code == 400
+        assert session_factory().query(Document).count() == 0
+
+    def test_rejects_empty_file(self, api):
+        client, *_ = api
+        response = client.post(
+            "/documents", headers=auth_headers(), files={"files": ("scan.png", b"", "image/png")}
+        )
+        assert response.status_code == 400
+
+    def test_rejects_too_many_files_in_one_request(self, api):
+        client, *_ = api
+        max_files = get_settings().max_files_per_upload
+        files = [("files", (f"scan-{i}.png", make_png_bytes(), "image/png")) for i in range(max_files + 1)]
+
+        response = client.post("/documents", headers=auth_headers(), files=files)
+
+        assert response.status_code == 413
+
+    def test_a_valid_batch_at_exactly_the_file_limit_is_accepted(self, api):
+        client, *_ = api
+        max_files = get_settings().max_files_per_upload
+        files = [("files", (f"scan-{i}.png", make_png_bytes(), "image/png")) for i in range(max_files)]
+
+        response = client.post("/documents", headers=auth_headers(), files=files)
+
+        assert response.status_code == 201
+        assert len(response.json()) == max_files
+
 
 class TestGetDocument:
     def test_requires_auth(self, api):

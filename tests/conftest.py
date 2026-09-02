@@ -17,7 +17,6 @@ nullable TEXT here — fine for tests that don't exercise search or notes.
 import pytest
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 _SQLITE_SCHEMA = """
 CREATE TABLE documents (
@@ -103,10 +102,21 @@ CREATE TABLE review_flags (
 
 
 @pytest.fixture()
-def sqlite_engine():
-    engine = create_engine(
-        "sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool
-    )
+def sqlite_engine(tmp_path):
+    """A real on-disk SQLite file, not `:memory:` + StaticPool.
+
+    A shared in-memory DB with StaticPool hands every session the *same*
+    underlying DBAPI connection object; the stdlib sqlite3 module doesn't
+    support genuinely concurrent execute() calls against one connection from
+    multiple threads even with check_same_thread=False, and would
+    intermittently raise "bad parameter or other API misuse" under real
+    concurrency (reproduced via tests/test_batch.py's ThreadPoolExecutor-
+    based ingest_directory tests). A temp file gives each session its own
+    connection, so SQLite's own file-level locking serializes concurrent
+    writers correctly instead of the two connections corrupting each
+    other's DBAPI-level state.
+    """
+    engine = create_engine(f"sqlite:///{tmp_path / 'test.db'}")
 
     @event.listens_for(engine, "connect")
     def _enable_foreign_keys(dbapi_connection, _connection_record):
