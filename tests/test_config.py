@@ -59,3 +59,34 @@ class TestProductionConfigGuard:
     def test_development_rate_limit_fails_open_by_default(self):
         settings = Settings(**BASE_KWARGS, app_env="development")
         assert settings.rate_limit_fail_closed_mutating is False
+
+
+class TestBlankRateLimitFailClosedEnvVar:
+    """.env.example ships RATE_LIMIT_FAIL_CLOSED_MUTATING= (blank), so the
+    setting stays documented without forcing a value. Passing a kwarg
+    doesn't exercise pydantic-settings' actual env-var string coercion, so
+    these go through the real path (an environment variable) that broke:
+    Settings() crashed on startup with pydantic_core.ValidationError
+    (bool_parsing) against a stock .env.example, reproduced live via
+    `docker compose up` before this fix.
+    """
+
+    def test_blank_env_var_is_treated_as_unset_not_invalid(self, monkeypatch):
+        monkeypatch.setenv("RATE_LIMIT_FAIL_CLOSED_MUTATING", "")
+        monkeypatch.setenv("DATABASE_URL", BASE_KWARGS["database_url"])
+        monkeypatch.setenv("REVIEW_API_TOKEN", BASE_KWARGS["review_api_token"])
+        monkeypatch.setenv("APP_ENV", "development")
+
+        settings = Settings(_env_file=None)
+
+        assert settings.rate_limit_fail_closed_mutating is False  # derived from app_env, not left blank/invalid
+
+    def test_a_real_boolean_env_var_still_works(self, monkeypatch):
+        monkeypatch.setenv("RATE_LIMIT_FAIL_CLOSED_MUTATING", "true")
+        monkeypatch.setenv("DATABASE_URL", BASE_KWARGS["database_url"])
+        monkeypatch.setenv("REVIEW_API_TOKEN", BASE_KWARGS["review_api_token"])
+        monkeypatch.setenv("APP_ENV", "development")
+
+        settings = Settings(_env_file=None)
+
+        assert settings.rate_limit_fail_closed_mutating is True

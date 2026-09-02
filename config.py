@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -41,8 +41,23 @@ class Settings(BaseSettings):
     # Reject decoded images above this many pixels (decompression-bomb cap).
     max_image_pixels: int = 40_000_000
     # When True (production default), Redis rate-limit failures reject
-    # mutating requests instead of failing open.
+    # mutating requests instead of failing open. None means "derive from
+    # app_env" (see the validator below) -- .env.example ships this blank
+    # on purpose, to document the setting without forcing a value.
     rate_limit_fail_closed_mutating: bool | None = None
+
+    @field_validator("rate_limit_fail_closed_mutating", mode="before")
+    @classmethod
+    def _blank_env_value_means_unset(cls, v: object) -> object:
+        """pydantic-settings treats an env var that's *present but empty*
+        differently from one that's *absent*: an empty string still gets
+        handed to bool validation and fails outright, rather than falling
+        through to the field's default -- verified live, this crashes
+        Settings() on startup with a stock .env.example (which ships
+        RATE_LIMIT_FAIL_CLOSED_MUTATING= blank, exactly so this stays
+        documented but unset by default). Treat blank the same as unset.
+        """
+        return None if v == "" else v
     # Comma-separated CIDRs or "any" of reverse proxies allowed to set
     # X-Forwarded-For. Empty means use request.client.host only.
     trusted_proxy_ips: list[str] = Field(default_factory=list)

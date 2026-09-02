@@ -1,4 +1,5 @@
-import { AppShell, Button, Group, Loader, NavLink, Text } from "@mantine/core";
+import { AppShell, Burger, Button, Group, Loader, NavLink, Text } from "@mantine/core";
+import { useDisclosure } from "@mantine/hooks";
 import { IconFileSearch, IconFlag, IconLayoutDashboard } from "@tabler/icons-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { NavLink as RouterNavLink, Route, Routes, useLocation } from "react-router-dom";
@@ -15,7 +16,7 @@ const NAV_ITEMS = [
   { to: "/search", label: "Search", icon: IconFileSearch },
 ];
 
-function Sidebar() {
+function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const location = useLocation();
   return (
     <>
@@ -27,6 +28,7 @@ function Sidebar() {
           label={item.label}
           leftSection={<item.icon size={18} />}
           active={location.pathname === item.to}
+          onClick={onNavigate}
         />
       ))}
     </>
@@ -35,6 +37,12 @@ function Sidebar() {
 
 function AuthenticatedApp({ reviewer }: { reviewer: string }) {
   const queryClient = useQueryClient();
+  // Mobile nav starts closed; the burger (shown only below the "sm"
+  // breakpoint) toggles it, and picking a page closes it again -- without
+  // this, AppShell's navbar has no collapse state at all below the
+  // breakpoint and just renders as a permanent full-width block, hiding
+  // every page's content behind it (reproduced: verified at 375px width).
+  const [mobileNavOpened, { toggle: toggleMobileNav, close: closeMobileNav }] = useDisclosure(false);
 
   async function logout() {
     await api.logout();
@@ -42,10 +50,17 @@ function AuthenticatedApp({ reviewer }: { reviewer: string }) {
   }
 
   return (
-    <AppShell navbar={{ width: 220, breakpoint: "sm" }} header={{ height: 56 }} padding={0}>
+    <AppShell
+      navbar={{ width: 220, breakpoint: "sm", collapsed: { mobile: !mobileNavOpened } }}
+      header={{ height: 56 }}
+      padding={0}
+    >
       <AppShell.Header>
         <Group h="100%" px="md" justify="space-between">
-          <Text fw={700}>Document Archive — Review</Text>
+          <Group gap="sm">
+            <Burger opened={mobileNavOpened} onClick={toggleMobileNav} hiddenFrom="sm" size="sm" />
+            <Text fw={700}>Document Archive — Review</Text>
+          </Group>
           <Group gap="sm">
             <Text size="sm" c="dimmed">
               {reviewer}
@@ -58,7 +73,7 @@ function AuthenticatedApp({ reviewer }: { reviewer: string }) {
       </AppShell.Header>
 
       <AppShell.Navbar p="xs">
-        <Sidebar />
+        <Sidebar onNavigate={closeMobileNav} />
       </AppShell.Navbar>
 
       <AppShell.Main style={{ height: "calc(100vh - 56px)", display: "flex", flexDirection: "column", overflow: "hidden" }}>

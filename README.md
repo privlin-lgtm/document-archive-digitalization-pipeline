@@ -4,6 +4,22 @@ Ingests scanned images of handwritten and poorly-typed historical documents,
 runs OCR, extracts structured entities, indexes the results in Postgres full-text
 search, and surfaces low-confidence results for human review.
 
+<p align="center">
+  <img src="docs/screenshots/document-view.png" width="49%" alt="Split-pane document view: scanned image with bounding-box overlays synced to an entity panel">
+  <img src="docs/screenshots/review-queue.png" width="49%" alt="Review queue: open flags sorted by severity with keyboard-shortcut resolve/dismiss">
+</p>
+<p align="center">
+  <img src="docs/screenshots/dashboard.png" width="49%" alt="Dashboard: document counts and recent uploads">
+  <img src="docs/screenshots/search.png" width="49%" alt="Full-text search with date/entity/location filters">
+</p>
+
+**Contents:** [Pipeline stages](#pipeline-stages)
+· [Trying the review API](#trying-the-review-api) · [Trying the pipeline end-to-end](#trying-the-pipeline-end-to-end)
+· [Project layout](#project-layout) · [Requirements](#requirements) · [Local development](#local-development)
+· [Docker Compose](#running-the-full-stack-docker-compose) · [Configuration](#configuration)
+· [Known limitations](#known-limitations--accepted-follow-up-work)
+· [Security & hardening](#security--production-hardening)
+
 ## Pipeline stages
 
 1. **Upload** (`ingestion/`) — a scanned image is received via the API and
@@ -522,30 +538,66 @@ concurrent/degraded conditions. What it found and fixed:
   `ThreadPoolExecutor`-based batch-ingestion tests that had been
   intermittently tripping it.
 
-What was deliberately **not** done, because it needs a product or
-infrastructure decision this pass isn't positioned to make unilaterally:
+### Follow-up pass: session auth, gateway, backups, and two boot-breaking bugs
 
-- **TLS/HTTPS** — this stack has no reverse proxy or cert management;
-  terminate TLS in front of it (a real load balancer, Caddy, nginx) before
-  exposing it beyond a trusted network. Bearer tokens and document images
-  transit in cleartext otherwise.
-- **Real per-user authentication** — there's one shared bearer token for
-  every reviewer, by original design (see stage 8's "assume a single
-  reviewer role for MVP" in `document-archive-pipeline-prompts.md`). One
-  consequence worth naming explicitly: `PATCH /entities/{id}`'s `reviewer`
-  field is client-supplied free text with nothing to verify it against, so
-  the correction audit trail records what a caller *claims* to be, not a
-  verified identity. Fixing this is a real feature (login, sessions,
-  per-user tokens), not a patch.
-- **A real S3 backend** — `storage_backend=s3` now fails fast instead of
-  failing confusingly on first upload, but "local disk" is still the only
-  backend that actually works. No storage retention/quota policy exists
-  either way — every upload accumulates on disk indefinitely.
-- **Full observability** (metrics, tracing, alerting) — logs only. Fine for
-  the current scale, a real gap at archive scale where "which stage is
-  slow on this batch" needs more than log-grepping.
-- **A dependency vulnerability scan** — not run as part of this pass
+A second pass (via Cursor) closed several of the gaps the first pass had
+left deliberately open, then a third pass found and fixed two bugs the
+second one had introduced — the kind of thing that only surfaces by
+actually running the stack, not by reading the code:
+
+- **Session auth replaces the bare bearer token in the browser**
+  (`review_api/session.py`, `review_api/auth_routes.py`) — `POST
+  /auth/login` exchanges the shared token for an HMAC-signed, HttpOnly,
+  12-hour session cookie; the token itself is typed once and never stored
+  in JavaScript. This directly fixes the old "token embedded in the SPA
+  bundle" and "forgeable `reviewer` field" issues: `PATCH /entities/{id}`'s
+  audit-trail identity now comes from the signed session, not a
+  client-supplied string. It is *not* yet full per-user accounts — every
+  reviewer still logs in with the same shared password — but the
+  audit-trail forgery gap is closed.
+- **A reverse-proxy gateway** (`gateway/Caddyfile`, the `gateway` service)
+  fronts `web`/`app` on one origin. It's TLS-*ready* (Caddy auto-provisions
+  HTTPS the moment it's given a real domain instead of `:80`), but not
+  TLS-*enabled* out of the box — there's still no certificate without that
+  extra step.
+- **Scheduled backups** (`scripts/backup.sh`, the `backup` service) —
+  periodic `pg_dump` + a tar of the documents volume, with 14-copy
+  rotation. This covers disaster recovery; it does not add a retention/
+  quota policy for the live serving volume, which still grows unbounded.
+- **A minimal `/metrics` endpoint** (`review_api/metrics.py`) — in-memory
+  request counters, not a real time-series/Prometheus setup. A first step,
+  not "full observability."
+- **Two bugs from that pass, found by actually running `docker compose up`
+  with a fresh `.env.example`, not by reading the diff:** `.env.example`
+  shipped `RATE_LIMIT_FAIL_CLOSED_MUTATING=` (blank) for a field typed
+  `bool | None` — pydantic-settings treats a *present-but-empty* env var
+  differently from an *absent* one, so it crashed `Settings()` on every
+  boot rather than falling through to the default (fixed: `config.py` now
+  treats a blank value as unset). Separately, `docker-compose.yml`'s
+  `${DATABASE_URL:-db:5432/...}` pattern let a host-oriented `.env` value
+  (needed for `uv run` local dev, which legitimately needs `localhost`
+  instead of `db`) silently leak into the container via Compose's own
+  variable interpolation — the app tried to reach its own loopback instead
+  of the `db` service. Fixed by hardcoding the in-network values for
+  `app`/`worker` directly rather than making them overridable through the
+  same `.env` a host-dev workflow also uses.
+
+What's still genuinely open:
+
+- **Real per-user accounts** — one shared login password for every
+  reviewer, by original design (see stage 8's "assume a single reviewer
+  role for MVP" in `document-archive-pipeline-prompts.md`). Individual
+  login/logout and per-user revocation would be a real feature to add, not
+  a patch.
+- **TLS actually enabled** — needs a real domain pointed at the gateway.
+- **A real S3 backend and a storage retention/quota policy** —
+  `storage_backend=s3` fails fast instead of failing confusingly on first
+  upload, but "local disk" is still the only backend that actually works,
+  and nothing prunes it.
+- **Real observability** — metrics/tracing/alerting beyond the minimal
+  counter above.
+- **A dependency vulnerability scan** — not run as part of either pass
   (network-restricted environment). `web/`'s production deps showed 0
-  known vulnerabilities via `npm audit` at the time of this review; the
-  Python side wasn't checked the same way — run `uvx pip-audit` before a
-  real deployment.
+  known vulnerabilities via `npm audit` at the time of the first review;
+  the Python side wasn't checked the same way — run `uvx pip-audit` before
+  a real deployment.
