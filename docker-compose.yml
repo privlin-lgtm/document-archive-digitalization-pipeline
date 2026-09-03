@@ -53,7 +53,16 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
       RATE_LIMIT_REDIS_URL: redis://redis:6379/2
-      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-["any"]}
+      # Left unset by default (Settings' own default: trust nothing, use the
+      # raw socket peer). This used to default to "any" here, which meant
+      # rate-limiting trusted X-Forwarded-For from *anyone*, including a
+      # client hitting the app directly on the published 8000 port -- a
+      # forged header let a client pick its own rate-limit bucket. If this
+      # app is deployed behind the gateway *and* 8000 is not published (see
+      # the app port comment above), set this to the gateway's address so
+      # real per-client limiting works; the Caddyfile already overwrites
+      # X-Forwarded-For rather than trusting the client's own value.
+      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-}
     # 8000 is for local Vite (`npm run dev` proxies here). Production should
     # publish only the gateway (8080/443) and leave this unpublished.
     ports:

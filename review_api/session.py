@@ -29,7 +29,14 @@ def issue_session(reviewer: str) -> str:
     return f"{body}.{sig}"
 
 
-def read_session(token: str) -> str:
+def decode_session(token: str) -> tuple[str, str, int]:
+    """Verify `token` and return (reviewer, signature, exp).
+
+    The signature is exposed so callers can key a revocation denylist off it
+    (see review_api.session_revocation) -- it's already the unique,
+    unforgeable part of the token, so there's no need for a separate session
+    ID just to support revocation.
+    """
     try:
         body, sig = token.rsplit(".", 1)
     except ValueError as exc:
@@ -38,9 +45,15 @@ def read_session(token: str) -> str:
     if not hmac.compare_digest(sig, expected):
         raise SessionError("invalid session signature")
     payload = json.loads(urlsafe_b64decode(body + "=" * (-len(body) % 4)))
-    if int(payload.get("exp", 0)) < time.time():
+    exp = int(payload.get("exp", 0))
+    if exp < time.time():
         raise SessionError("session expired")
     reviewer = str(payload.get("reviewer") or "").strip()
     if not reviewer:
         raise SessionError("session missing reviewer")
+    return reviewer, sig, exp
+
+
+def read_session(token: str) -> str:
+    reviewer, _sig, _exp = decode_session(token)
     return reviewer

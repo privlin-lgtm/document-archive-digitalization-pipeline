@@ -186,7 +186,7 @@ def estimate_quality(image: np.ndarray) -> float:
     contrast = float(gray.std())
 
     # Empirically-chosen normalization ceilings for typical 300dpi document scans.
-    sharpness_score = min(sharpness / 500.0, 1.0)
+    sharpness_score = min(float(sharpness) / 500.0, 1.0)
     contrast_score = min(contrast / 80.0, 1.0)
     return round((sharpness_score + contrast_score) / 2.0, 4)
 

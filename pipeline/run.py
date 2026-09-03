@@ -142,6 +142,23 @@ def _run_ocr_with_retry(image: np.ndarray) -> OCRResult:
     return result  # type: ignore[return-value]  # loop always runs >=1 time
 
 
+class DocumentLockTimeout(Exception):
+    """Could not acquire a document's advisory lock within the wait bound."""
+
+
+# pg_advisory_lock() blocks indefinitely -- if a redelivered duplicate job
+# (see _ensure_page_and_regions's docstring on why redelivery races happen)
+# lands behind a first attempt that's stuck or simply slow, the second
+# worker would otherwise sit parked on this call for up to the task's own
+# time limit (worker.py's task_time_limit=900s), tying up a concurrency
+# slot for nothing useful. Poll with pg_try_advisory_lock and give up with a
+# bounded wait instead, so a stuck sibling fails fast and lets Celery's own
+# job-level retry/backoff (worker.run_ocr_job) handle it like any other
+# transient failure.
+_ADVISORY_LOCK_MAX_WAIT_SECONDS = 60.0
+_ADVISORY_LOCK_POLL_SECONDS = 1.0
+
+
 def _advisory_lock_key(document_id: UUID) -> int:
     return int(document_id.int % (2**63 - 1))
 
@@ -149,7 +166,19 @@ def _advisory_lock_key(document_id: UUID) -> int:
 def _advisory_lock(session, document_id: UUID) -> None:
     if session.get_bind().dialect.name != "postgresql":
         return
-    session.execute(text("SELECT pg_advisory_lock(:k)"), {"k": _advisory_lock_key(document_id)})
+    key = _advisory_lock_key(document_id)
+    waited = 0.0
+    while True:
+        acquired = session.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": key}).scalar()
+        if acquired:
+            return
+        if waited >= _ADVISORY_LOCK_MAX_WAIT_SECONDS:
+            raise DocumentLockTimeout(
+                f"could not acquire pipeline lock for document {document_id} "
+                f"within {_ADVISORY_LOCK_MAX_WAIT_SECONDS}s (another run is still in progress)"
+            )
+        time.sleep(_ADVISORY_LOCK_POLL_SECONDS)
+        waited += _ADVISORY_LOCK_POLL_SECONDS
 
 
 def _advisory_unlock(session, document_id: UUID) -> None:
@@ -517,8 +546,8 @@ def run_pipeline(document_id: str) -> None:
         document = session.get(Document, UUID(document_id))
         if document is None:
             raise ValueError(f"document {document_id} not found")
-        lock_id = document.id
-        _advisory_lock(session, lock_id)
+        _advisory_lock(session, document.id)
+        lock_id = document.id  # only set once actually held, so `finally` doesn't unlock a lock we never acquired
 
         try:
             page_images = load_page_images(document.raw_image_path)

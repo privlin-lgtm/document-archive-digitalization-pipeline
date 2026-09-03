@@ -1,15 +1,23 @@
 import secrets
+import time
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
 from config import get_settings
 from review_api.auth import require_api_token
 from review_api.principal import AuthPrincipal
-from review_api.rate_limit import enforce_rate_limit
-from review_api.session import COOKIE_NAME, SESSION_TTL_SECONDS, issue_session
+from review_api.rate_limit import enforce_login_rate_limit, enforce_rate_limit
+from review_api.session import (
+    COOKIE_NAME,
+    SESSION_TTL_SECONDS,
+    SessionError,
+    decode_session,
+    issue_session,
+)
+from review_api.session_revocation import revoke
 
-router = APIRouter(prefix="/auth", tags=["auth"], dependencies=[Depends(enforce_rate_limit)])
+router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 class LoginRequest(BaseModel):
@@ -21,7 +29,7 @@ class SessionOut(BaseModel):
     reviewer: str
 
 
-@router.post("/login", response_model=SessionOut)
+@router.post("/login", response_model=SessionOut, dependencies=[Depends(enforce_login_rate_limit)])
 def login(body: LoginRequest, response: Response) -> SessionOut:
     """Exchange the shared API token for an HttpOnly session cookie.
 
@@ -45,11 +53,24 @@ def login(body: LoginRequest, response: Response) -> SessionOut:
     return SessionOut(reviewer=reviewer)
 
 
-@router.post("/logout", status_code=204)
-def logout(response: Response) -> None:
+@router.post("/logout", status_code=204, dependencies=[Depends(enforce_rate_limit)])
+def logout(request: Request, response: Response) -> None:
+    """Clears the browser's cookie *and* revokes the token server-side, so a
+    copy of the cookie made before logout (a shared machine, a proxy log,
+    another tab that already had it) can't keep working for the rest of its
+    12h TTL -- deleting only the client's copy, the previous behavior here,
+    left the token itself still valid to anyone who held it.
+    """
+    cookie = request.cookies.get(COOKIE_NAME)
+    if cookie:
+        try:
+            _reviewer, signature, exp = decode_session(cookie)
+            revoke(signature, ttl_seconds=exp - int(time.time()))
+        except SessionError:
+            pass  # already invalid/expired -- nothing to revoke
     response.delete_cookie(COOKIE_NAME, path="/")
 
 
-@router.get("/me", response_model=SessionOut)
+@router.get("/me", response_model=SessionOut, dependencies=[Depends(enforce_rate_limit)])
 def me(principal: AuthPrincipal = Depends(require_api_token)) -> SessionOut:
     return SessionOut(reviewer=principal.reviewer)

@@ -1,7 +1,16 @@
 :80 {
 	handle /api/* {
 		uri strip_prefix /api
-		reverse_proxy app:8000
+		reverse_proxy app:8000 {
+			# Overwrite, not append: Caddy's default reverse_proxy behavior
+			# appends the real client IP to any X-Forwarded-For the client
+			# already sent, so a client-supplied value survives at the front
+			# of the header. The app trusts this header's *last* hop when
+			# TRUSTED_PROXY_IPS is configured for this gateway -- overwriting
+			# here means that hop can only ever be the real remote address,
+			# never something the client injected.
+			header_up X-Forwarded-For {http.request.remote.host}
+		}
 	}
 
 	handle {

@@ -1,14 +1,24 @@
+import { lazy, Suspense } from "react";
 import { AppShell, Burger, Button, Group, Loader, NavLink, Text } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
 import { IconFileSearch, IconFlag, IconLayoutDashboard } from "@tabler/icons-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { NavLink as RouterNavLink, Route, Routes, useLocation } from "react-router-dom";
 import { api } from "./api/client";
-import { DashboardPage } from "./routes/DashboardPage";
-import { DocumentViewPage } from "./routes/DocumentViewPage";
 import { LoginPage } from "./routes/LoginPage";
-import { ReviewQueuePage } from "./routes/ReviewQueuePage";
-import { SearchPage } from "./routes/SearchPage";
+
+// Lazy: each of these only needs to load once a reviewer picks that page,
+// not as part of the single bundle every visitor downloads just to reach
+// the login screen -- the built bundle was a single 584KB/180KB-gzip chunk
+// with no split points at all before this.
+const DashboardPage = lazy(() => import("./routes/DashboardPage").then((m) => ({ default: m.DashboardPage })));
+const DocumentViewPage = lazy(() =>
+  import("./routes/DocumentViewPage").then((m) => ({ default: m.DocumentViewPage })),
+);
+const ReviewQueuePage = lazy(() =>
+  import("./routes/ReviewQueuePage").then((m) => ({ default: m.ReviewQueuePage })),
+);
+const SearchPage = lazy(() => import("./routes/SearchPage").then((m) => ({ default: m.SearchPage })));
 
 const NAV_ITEMS = [
   { to: "/", label: "Dashboard", icon: IconLayoutDashboard },
@@ -77,33 +87,41 @@ function AuthenticatedApp({ reviewer }: { reviewer: string }) {
       </AppShell.Navbar>
 
       <AppShell.Main style={{ height: "calc(100vh - 56px)", display: "flex", flexDirection: "column", overflow: "hidden" }}>
-        <Routes>
-          <Route
-            path="/"
-            element={
-              <div className="page-scroll">
-                <DashboardPage />
-              </div>
-            }
-          />
-          <Route path="/documents/:documentId" element={<DocumentViewPage />} />
-          <Route
-            path="/review"
-            element={
-              <div className="page-scroll">
-                <ReviewQueuePage />
-              </div>
-            }
-          />
-          <Route
-            path="/search"
-            element={
-              <div className="page-scroll">
-                <SearchPage />
-              </div>
-            }
-          />
-        </Routes>
+        <Suspense
+          fallback={
+            <Group h="100%" justify="center">
+              <Loader />
+            </Group>
+          }
+        >
+          <Routes>
+            <Route
+              path="/"
+              element={
+                <div className="page-scroll">
+                  <DashboardPage />
+                </div>
+              }
+            />
+            <Route path="/documents/:documentId" element={<DocumentViewPage />} />
+            <Route
+              path="/review"
+              element={
+                <div className="page-scroll">
+                  <ReviewQueuePage />
+                </div>
+              }
+            />
+            <Route
+              path="/search"
+              element={
+                <div className="page-scroll">
+                  <SearchPage />
+                </div>
+              }
+            />
+          </Routes>
+        </Suspense>
       </AppShell.Main>
     </AppShell>
   );

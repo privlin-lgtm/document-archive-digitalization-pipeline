@@ -90,3 +90,41 @@ class TestBlankRateLimitFailClosedEnvVar:
         settings = Settings(_env_file=None)
 
         assert settings.rate_limit_fail_closed_mutating is True
+
+
+class TestTrustedProxyIps:
+    """trusted_proxy_ips used to be list[str], which makes pydantic-settings
+    decode the env var as JSON. Two real values crashed Settings() at
+    startup because of that: a blank value (what `${TRUSTED_PROXY_IPS:-}`
+    in docker-compose.yml produces when unset) and this field's own
+    documented comma-separated format ("10.0.0.1,10.0.0.2") -- reproduced
+    live against the real env-var path, both raised SettingsError before
+    this field became a plain string. .env.example ships it blank.
+    """
+
+    def test_blank_env_var_yields_an_empty_trusted_list(self, monkeypatch):
+        monkeypatch.setenv("TRUSTED_PROXY_IPS", "")
+        monkeypatch.setenv("DATABASE_URL", BASE_KWARGS["database_url"])
+        monkeypatch.setenv("REVIEW_API_TOKEN", BASE_KWARGS["review_api_token"])
+
+        settings = Settings(_env_file=None)
+
+        assert settings.trusted_proxy_ips_list == []
+
+    def test_documented_comma_separated_format_works(self, monkeypatch):
+        monkeypatch.setenv("TRUSTED_PROXY_IPS", "10.0.0.1,10.0.0.2")
+        monkeypatch.setenv("DATABASE_URL", BASE_KWARGS["database_url"])
+        monkeypatch.setenv("REVIEW_API_TOKEN", BASE_KWARGS["review_api_token"])
+
+        settings = Settings(_env_file=None)
+
+        assert settings.trusted_proxy_ips_list == ["10.0.0.1", "10.0.0.2"]
+
+    def test_any_keyword_works(self, monkeypatch):
+        monkeypatch.setenv("TRUSTED_PROXY_IPS", "any")
+        monkeypatch.setenv("DATABASE_URL", BASE_KWARGS["database_url"])
+        monkeypatch.setenv("REVIEW_API_TOKEN", BASE_KWARGS["review_api_token"])
+
+        settings = Settings(_env_file=None)
+
+        assert settings.trusted_proxy_ips_list == ["any"]

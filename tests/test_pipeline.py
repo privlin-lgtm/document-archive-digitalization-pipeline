@@ -17,6 +17,43 @@ import pipeline.run as pipeline_run
 from storage.models import Document, DocumentStatus, Entity, Page, ReviewFlag
 
 
+class _FakePostgresBind:
+    dialect = type("Dialect", (), {"name": "postgresql"})()
+
+
+class _FakeLockSession:
+    """Mimics just enough of a SQLAlchemy Session for _advisory_lock: a
+    postgresql dialect and a pg_try_advisory_lock call that always reports
+    "not acquired", to exercise the bounded-wait timeout without needing a
+    real Postgres with a genuinely held lock.
+    """
+
+    def __init__(self):
+        self.call_count = 0
+
+    def get_bind(self):
+        return _FakePostgresBind()
+
+    def execute(self, _stmt, _params):
+        self.call_count += 1
+        return type("Result", (), {"scalar": lambda self: False})()
+
+
+class TestAdvisoryLockTimeout:
+    def test_gives_up_after_the_bounded_wait_instead_of_blocking_forever(self, monkeypatch):
+        slept: list[float] = []
+        monkeypatch.setattr(pipeline_run.time, "sleep", lambda s: slept.append(s))
+        monkeypatch.setattr(pipeline_run, "_ADVISORY_LOCK_MAX_WAIT_SECONDS", 3.0)
+        monkeypatch.setattr(pipeline_run, "_ADVISORY_LOCK_POLL_SECONDS", 1.0)
+
+        session = _FakeLockSession()
+        with pytest.raises(pipeline_run.DocumentLockTimeout):
+            pipeline_run._advisory_lock(session, uuid.uuid4())
+
+        assert sum(slept) == pytest.approx(3.0)  # gave up at the bound, not sooner or later
+        assert session.call_count == 4  # one try per poll (t=0,1,2,3) before giving up
+
+
 def _paragraph_block_image(width: int = 1200, height: int = 900) -> np.ndarray:
     """One dense ink block -- enough for ocr.layout.detect_regions to find a
     single paragraph-classified region (mirrors tests/test_layout.py).

@@ -59,8 +59,17 @@ class Settings(BaseSettings):
         """
         return None if v == "" else v
     # Comma-separated CIDRs or "any" of reverse proxies allowed to set
-    # X-Forwarded-For. Empty means use request.client.host only.
-    trusted_proxy_ips: list[str] = Field(default_factory=list)
+    # X-Forwarded-For. Empty means use request.client.host only. Deliberately
+    # a plain string, not list[str]: pydantic-settings decodes a list-typed
+    # env var as JSON, which rejects both an empty value and this field's own
+    # documented comma-separated format ("10.0.0.1,10.0.0.2") outright --
+    # reproduced live, both crash Settings() at boot. See
+    # trusted_proxy_ips_list below for the parsed form callers should use.
+    trusted_proxy_ips: str = ""
+
+    @property
+    def trusted_proxy_ips_list(self) -> list[str]:
+        return [ip.strip() for ip in self.trusted_proxy_ips.split(",") if ip.strip()]
 
     # Celery / broker
     celery_broker_url: str = "redis://localhost:6379/0"
@@ -74,6 +83,11 @@ class Settings(BaseSettings):
     # why a per-route stricter limit on uploads was tried and dropped).
     rate_limit_redis_url: str = "redis://localhost:6379/2"
     rate_limit_default: str = "60/minute"
+    # /auth/login gets its own, stricter limit -- the general limit above is
+    # sized for normal API traffic and is generous enough that it barely
+    # slows down credential-guessing against the single shared
+    # review_api_token.
+    rate_limit_login: str = "5/minute"
 
     # Anomaly/review-flag thresholds (extraction/anomalies.py) — configurable
     # rather than hardcoded, since the "right" threshold depends on the

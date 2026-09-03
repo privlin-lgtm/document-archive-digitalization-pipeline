@@ -94,6 +94,8 @@ def _document_summary(document_id: uuid.UUID) -> dict:
     session = SessionLocal()
     try:
         document = session.get(Document, document_id)
+        if document is None:
+            raise ValueError(f"document {document_id} not found")
         entity_count = session.scalar(
             select(func.count())
             .select_from(Entity)

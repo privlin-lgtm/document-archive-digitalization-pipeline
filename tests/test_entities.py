@@ -189,9 +189,9 @@ class TestCrossCutting:
 
         by_text_a = {e.raw_text: e.confidence for e in without_ocr}
         by_text_b = {e.raw_text: e.confidence for e in with_low_ocr}
-        for raw_text in by_text_a:
-            assert by_text_b[raw_text] < by_text_a[raw_text]
-            assert by_text_b[raw_text] == pytest.approx(by_text_a[raw_text] * 0.5, abs=1e-6)
+        for raw_text, confidence_a in by_text_a.items():
+            assert by_text_b[raw_text] < confidence_a
+            assert by_text_b[raw_text] == pytest.approx(confidence_a * 0.5, abs=1e-6)
 
     def test_region_bbox_is_attached_to_every_entity(self):
         bbox = (5, 10, 200, 40)

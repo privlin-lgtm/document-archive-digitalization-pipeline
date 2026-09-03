@@ -32,17 +32,29 @@ def parse_rate_limit(spec: str) -> tuple[int, int]:
 
 
 def client_ip(request: Request) -> str:
+    """The real client IP for rate-limiting, trusting X-Forwarded-For only
+    from a configured reverse proxy.
+
+    A proxy that appends to (rather than replaces) X-Forwarded-For puts the
+    real client at the *rightmost* position it added -- everything to its
+    left is whatever the client itself sent, and is not trustworthy. Reading
+    the leftmost entry instead (the previous behavior here) let any client
+    pick its own apparent IP by sending a fabricated X-Forwarded-For header,
+    which defeats per-IP rate limiting entirely -- confirmed live: distinct
+    fake headers on successive requests each got their own limit bucket.
+    """
     settings = get_settings()
     remote = request.client.host if request.client else "unknown"
     forwarded = request.headers.get("x-forwarded-for")
-    if not forwarded or not settings.trusted_proxy_ips:
+    trusted = settings.trusted_proxy_ips_list
+    if not forwarded or not trusted:
         return remote
-    if "any" not in settings.trusted_proxy_ips and remote not in settings.trusted_proxy_ips:
+    if "any" not in trusted and remote not in trusted:
         return remote
-    return forwarded.split(",")[0].strip() or remote
+    return forwarded.split(",")[-1].strip() or remote
 
 
-async def enforce_rate_limit(request: Request) -> None:
+async def _enforce(request: Request, limit_spec: str) -> None:
     global _circuit_open_until
 
     settings = get_settings()
@@ -57,7 +69,7 @@ async def enforce_rate_limit(request: Request) -> None:
             )
         return
 
-    limit, window_seconds = parse_rate_limit(settings.rate_limit_default)
+    limit, window_seconds = parse_rate_limit(limit_spec)
     window = int(time.time()) // window_seconds
     key = f"ratelimit:{client_ip(request)}:{request.url.path}:{window}"
 
@@ -84,3 +96,18 @@ async def enforce_rate_limit(request: Request) -> None:
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"rate limit exceeded: {limit} requests per {window_seconds}s",
         )
+
+
+async def enforce_rate_limit(request: Request) -> None:
+    await _enforce(request, get_settings().rate_limit_default)
+
+
+async def enforce_login_rate_limit(request: Request) -> None:
+    """A stricter, dedicated limit for /auth/login: the general per-route
+    limit (60/minute by default) is generous enough that it barely slows
+    down credential guessing against the single shared review_api_token --
+    login needs its own tighter bucket regardless of how the general limit
+    is tuned. Keyed by the same (client_ip, path, window) scheme, so it
+    doesn't share a bucket -- or a rate -- with any other route.
+    """
+    await _enforce(request, get_settings().rate_limit_login)

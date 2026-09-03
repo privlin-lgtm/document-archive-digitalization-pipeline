@@ -61,7 +61,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import exists, func, select
+from sqlalchemy import ColumnElement, exists, func, select
 from sqlalchemy.orm import Session, aliased
 
 from storage.models import Document, Entity, EntityType, OCRResultRecord, Page, Region
@@ -245,7 +245,7 @@ def search_documents(
     rank = func.ts_rank(Page.full_text_search, tsquery).label("rank")
     snippet = func.ts_headline("english", Page.full_text, tsquery).label("snippet")
 
-    filters = [Page.full_text_search.op("@@")(tsquery)]
+    filters: list[ColumnElement[bool]] = [Page.full_text_search.op("@@")(tsquery)]
 
     if date_from is not None or date_to is not None:
         date_entity, date_region = aliased(Entity), aliased(Region)

@@ -17,12 +17,17 @@ from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import cv2
 import numpy as np
 
 from ocr.preprocess import to_grayscale
+
+if TYPE_CHECKING:
+    # Only imported for annotations -- torch/transformers are an optional
+    # extra (see _load below), never required just to import this module.
+    from transformers import TrOCRProcessor, VisionEncoderDecoderModel
 
 logger = logging.getLogger(__name__)
 
@@ -225,8 +230,8 @@ class TrOCRBackend(OCRBackend):
 
     def __init__(self, model_name: str = "microsoft/trocr-base-handwritten"):
         self.model_name = model_name
-        self._processor = None
-        self._model = None
+        self._processor: TrOCRProcessor | None = None
+        self._model: VisionEncoderDecoderModel | None = None
 
     def _load(self) -> None:
         try:
@@ -244,6 +249,11 @@ class TrOCRBackend(OCRBackend):
     def run(self, image: np.ndarray) -> OCRResult:
         if self._model is None:
             self._load()
+        # _load() always sets both or raises -- this just gives mypy (and a
+        # future reader) the same guarantee explicitly rather than relying
+        # on it inferring across the method call.
+        assert self._model is not None
+        assert self._processor is not None
 
         import torch
         from PIL import Image
@@ -303,11 +313,11 @@ class OCRRouter:
 
         try:
             return self._run_with_timeout(primary, image)
-        except Exception as primary_error:
+        except Exception as primary_error:  # noqa: BLE001 - any backend failure must fall back, not just the ones anticipated
             logger.warning("primary backend '%s' failed: %s", primary.name, primary_error)
             try:
                 result = self._run_with_timeout(fallback, image)
-            except Exception as fallback_error:
+            except Exception as fallback_error:  # noqa: BLE001 - same: report "both failed" rather than let an unanticipated error crash the pipeline job
                 logger.error(
                     "both backends failed: primary '%s' (%s), fallback '%s' (%s)",
                     primary.name, primary_error, fallback.name, fallback_error,

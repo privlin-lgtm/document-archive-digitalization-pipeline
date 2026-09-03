@@ -34,6 +34,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "httpx>=0.27",
     "ruff>=0.7",
+    "mypy>=1.13",
 ]
 # Heavy transformer-based handwriting backend. Not installed by default:
 # torch + model weights are large downloads. Install with `uv sync --extra handwriting`.
@@ -69,3 +70,58 @@ asyncio_mode = "auto"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.mypy]
+# Checked against 3.12 typeshed, one above requires-python's 3.11 floor:
+# the installed numpy's bundled .pyi stubs use PEP 695 `type` statement
+# syntax, which mypy rejects outright under a 3.11 target ("errors
+# prevented further checking" before any of this project's own code was
+# even reached). This only affects which typeshed/stub syntax mypy accepts,
+# not what CI actually runs the tests on (still 3.11, per that workflow).
+python_version = "3.12"
+# Permissive baseline, not strict mode: this codebase has type hints
+# throughout but has never been checked, so starting strict would surface
+# an unbounded backlog on day one instead of catching new regressions.
+# check_untyped_defs still type-checks the body of every function (even
+# ones without full annotations), which is where a real mismatch actually
+# gets caught -- ignore_missing_imports just means an unstubbed third-party
+# import (cv2, pytesseract, ...) doesn't block the whole run.
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+exclude = ["^alembic/versions/"]
+# Understands BaseModel/BaseSettings' dynamically-generated __init__ from
+# field declarations -- without it, config.Settings() looks like a call
+# missing every required argument to mypy, since it can't see that
+# pydantic-settings populates them from the environment at runtime.
+plugins = ["pydantic.mypy"]
+# Production code only (invoke as plain `mypy`, no path argument -- a path
+# argument on the command line overrides this list entirely). tests/ isn't
+# a package (no __init__.py by design), so a module-name override can't
+# glob "every test_*.py file" the way `tests.*` would for a real package;
+# excluding the directory here is the straightforward alternative. Tests
+# lean on patterns that legitimately defeat static typing rather than
+# indicate real bugs: constructing Settings/dataclasses via **kwargs dicts
+# built for readability, not type-accuracy; pydantic-settings' private
+# _env_file kwarg (real at runtime, absent from the plugin-generated
+# __init__); module-level "Redis | None, narrowed by a skipif" fixtures.
+# Production code is what needs the static safety net.
+files = [
+    "config.py",
+    "worker.py",
+    "review_api",
+    "ocr",
+    "extraction",
+    "storage",
+    "pipeline",
+    "ingestion",
+    "scripts",
+]
+
+[tool.ruff.lint]
+# B008 (function-call-in-default-argument) is a false positive for FastAPI's
+# own idiom -- Depends(...)/Query(...) *must* be called in the signature,
+# that's how FastAPI's dependency injection recognizes them. Left enabled,
+# it was 19 of `ruff check .`'s 29 findings, burying the ones that are real.
+ignore = ["B008"]

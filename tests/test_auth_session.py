@@ -46,3 +46,36 @@ def test_logout_clears_session():
     response = client.post("/auth/logout")
     assert response.status_code == 204
     assert client.get("/auth/me").status_code == 401
+
+
+def test_logout_revokes_the_token_not_just_the_client_cookie():
+    """A copy of the cookie made before logout (a shared machine, another
+    tab) must stop working immediately, not remain valid for the rest of
+    its TTL -- deleting only the browser's copy doesn't achieve that.
+    Skipped, not failed, without a reachable Redis: revocation degrades to
+    "not revoked" when the denylist can't be checked (see
+    review_api.session_revocation's module docstring for why that's the
+    deliberate fail-open behavior, same as the rate limiter's).
+    """
+    import redis as redis_module
+
+    try:
+        redis_module.from_url(
+            get_settings().rate_limit_redis_url, socket_connect_timeout=0.5
+        ).ping()
+    except Exception:  # noqa: BLE001 - any connectivity failure means "skip", not "fail"
+        pytest.skip("requires a live Redis at RATE_LIMIT_REDIS_URL")
+
+    client = TestClient(app)
+    client.post(
+        "/auth/login",
+        json={"reviewer": "paul@archive", "password": get_settings().review_api_token},
+    )
+    old_cookie_value = client.cookies.get("archive_session")
+
+    client.post("/auth/logout")
+
+    # Simulate a second holder of the pre-logout cookie value.
+    other_client = TestClient(app)
+    other_client.cookies.set("archive_session", old_cookie_value)
+    assert other_client.get("/auth/me").status_code == 401

@@ -15,8 +15,33 @@ nullable TEXT here — fine for tests that don't exercise search or notes.
 """
 
 import pytest
+import redis
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
+
+from config import get_settings
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limit_redis_state():
+    """review_api.rate_limit is process-wide state keyed by (client_ip,
+    path, window); FastAPI's TestClient reports the same fake client host
+    for every test, so unrelated tests hitting the same route within the
+    same window share a bucket. That's mostly harmless against the general
+    60/minute default, but /auth/login's much stricter 5/minute limit makes
+    it a real flakiness risk wherever a live Redis is actually reachable
+    (e.g. CI's redis service) -- reset the bucket before every test rather
+    than only inside test_rate_limit.py's own gated integration class.
+    A no-op (not a skip) when Redis isn't reachable, matching how the rate
+    limiter itself fails open in that case.
+    """
+    try:
+        client = redis.from_url(get_settings().rate_limit_redis_url, socket_connect_timeout=0.5)
+        client.ping()
+        client.flushdb()
+    except Exception:  # noqa: BLE001, S110 - any connectivity failure means "skip", not "fail"
+        pass
+    yield
 
 _SQLITE_SCHEMA = """
 CREATE TABLE documents (

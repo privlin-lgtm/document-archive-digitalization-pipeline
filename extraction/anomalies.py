@@ -262,7 +262,8 @@ def detect_inconsistent_name_spellings(
         name_a, name_b = a.raw_text.strip(), b.raw_text.strip()
         if name_a == name_b:
             continue
-        pair_key = tuple(sorted((name_a, name_b)))
+        first, second = sorted((name_a, name_b))
+        pair_key = (first, second)
         if pair_key in seen_pairs:
             continue
         similarity = fuzz.ratio(name_a, name_b) / 100.0

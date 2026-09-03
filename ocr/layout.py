@@ -218,7 +218,7 @@ def _reading_order_sort(boxes: list[BBox]) -> list[int]:
     row_y_ranges: list[tuple[int, int]] = []
 
     for i in order_by_top:
-        x, y, w, h = boxes[i]
+        _x, y, _w, h = boxes[i]
         y0, y1 = y, y + h
         placed = False
         for row_idx, (ry0, ry1) in enumerate(row_y_ranges):

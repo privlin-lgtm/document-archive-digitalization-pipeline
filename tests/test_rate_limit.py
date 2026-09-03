@@ -24,15 +24,47 @@ from review_api import rate_limit
 settings = get_settings()
 
 
-def _make_request(path: str = "/documents", client_host: str = "1.2.3.4") -> Request:
+def _make_request(
+    path: str = "/documents",
+    client_host: str = "1.2.3.4",
+    forwarded_for: str | None = None,
+) -> Request:
+    headers = [(b"x-forwarded-for", forwarded_for.encode())] if forwarded_for else []
     scope = {
         "type": "http",
         "method": "GET",
         "path": path,
-        "headers": [],
+        "headers": headers,
         "client": (client_host, 12345),
     }
     return Request(scope)
+
+
+class TestClientIp:
+    """A reverse proxy appends the real client IP to any X-Forwarded-For the
+    client already sent, so the trustworthy value is the *last* hop, not the
+    first -- reading the first let a client pick its own apparent IP by
+    sending a fabricated header, defeating per-IP rate limiting entirely.
+    """
+
+    def test_untrusted_by_default_ignores_forwarded_header(self, monkeypatch):
+        monkeypatch.setattr(settings, "trusted_proxy_ips", "")
+        request = _make_request(client_host="1.2.3.4", forwarded_for="9.9.9.9")
+        assert rate_limit.client_ip(request) == "1.2.3.4"
+
+    def test_trusted_proxy_uses_the_last_hop_not_the_first(self, monkeypatch):
+        monkeypatch.setattr(settings, "trusted_proxy_ips", "10.0.0.5")
+        # A client-forged leading entry followed by the trusted proxy's own
+        # appended (real) address.
+        request = _make_request(client_host="10.0.0.5", forwarded_for="9.9.9.9, 203.0.113.7")
+        assert rate_limit.client_ip(request) == "203.0.113.7"
+
+    def test_untrusted_remote_is_not_fooled_by_forwarded_header(self, monkeypatch):
+        monkeypatch.setattr(settings, "trusted_proxy_ips", "10.0.0.5")
+        # Request didn't come from the trusted proxy -- ignore the header
+        # even though one is present, whatever it claims.
+        request = _make_request(client_host="6.6.6.6", forwarded_for="9.9.9.9")
+        assert rate_limit.client_ip(request) == "6.6.6.6"
 
 
 class TestParseRateLimit:

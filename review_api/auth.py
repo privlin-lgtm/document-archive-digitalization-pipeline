@@ -5,7 +5,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from config import get_settings
 from review_api.principal import AuthPrincipal
-from review_api.session import COOKIE_NAME, SessionError, read_session
+from review_api.session import COOKIE_NAME, SessionError, decode_session
+from review_api.session_revocation import is_revoked
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -22,12 +23,18 @@ def require_api_token(
     cookie = request.cookies.get(COOKIE_NAME)
     if cookie:
         try:
-            return AuthPrincipal(reviewer=read_session(cookie), via="session")
+            reviewer, signature, _exp = decode_session(cookie)
         except SessionError:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="invalid or expired session",
             ) from None
+        if is_revoked(signature):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="session has been revoked",
+            )
+        return AuthPrincipal(reviewer=reviewer, via="session")
 
     settings = get_settings()
     if credentials is not None and secrets.compare_digest(
