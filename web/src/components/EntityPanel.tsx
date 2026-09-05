@@ -42,17 +42,23 @@ function EntityRow({
   const [draftValue, setDraftValue] = useState(entity.normalized_value ?? entity.raw_text);
   const correctEntity = useCorrectEntity(documentId);
   const inputRef = useRef<HTMLInputElement>(null);
+  const wasEditingRef = useRef(false);
 
   const isSelected = entity.id === selectedEntityId || (regionId === selectedRegionId && !selectedEntityId);
   const isHovered = entity.id === hoveredEntityId || (regionId === hoveredRegionId && !hoveredEntityId);
   const isEditing = entity.id === editingEntityId;
 
   useEffect(() => {
-    if (isEditing) {
+    // Only seed the draft on the false -> true transition. Re-running this on
+    // every entity refetch (e.g. React Query's refetchOnWindowFocus) while
+    // isEditing stays true would silently clobber in-progress keystrokes with
+    // the server's last-known value.
+    if (isEditing && !wasEditingRef.current) {
       setDraftValue(entity.normalized_value ?? entity.raw_text);
       inputRef.current?.focus();
       inputRef.current?.select();
     }
+    wasEditingRef.current = isEditing;
   }, [entity.normalized_value, entity.raw_text, isEditing]);
 
   function submitCorrection() {

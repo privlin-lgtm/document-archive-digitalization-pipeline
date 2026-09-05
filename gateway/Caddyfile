@@ -1,4 +1,16 @@
 :80 {
+	# HSTS is deliberately omitted: this gateway isn't TLS-enabled by default
+	# (see README's "Security & production hardening" section), and sending
+	# Strict-Transport-Security over plain HTTP is a no-op at best and a
+	# self-inflicted lockout at worst once TLS *is* turned on incorrectly.
+	# Add it alongside the real certificate config, not before.
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		Content-Security-Policy "default-src 'self'"
+	}
+
 	handle /api/* {
 		uri strip_prefix /api
 		reverse_proxy app:8000 {

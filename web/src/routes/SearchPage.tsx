@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { Group, Loader, NumberInput, Paper, Select, Stack, Text, TextInput } from "@mantine/core";
+import { Alert, Group, Loader, NumberInput, Paper, Select, Stack, Text, TextInput } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
 import { IconSearch } from "@tabler/icons-react";
 import { useSearch } from "../hooks/useSearch";
@@ -27,7 +27,7 @@ export function SearchPage() {
   const [offset, setOffset] = useState(0);
   const [debouncedQ] = useDebouncedValue(q, 250);
 
-  const { data, isFetching } = useSearch({
+  const { data, isFetching, error } = useSearch({
     q: debouncedQ,
     date_from: dateFrom || undefined,
     date_to: dateTo || undefined,
@@ -73,6 +73,12 @@ export function SearchPage() {
       </Group>
 
       {isFetching && <Loader size="sm" />}
+
+      {error && (
+        <Alert color="red" title="Search failed">
+          {error instanceof Error ? error.message : "Unknown error"}
+        </Alert>
+      )}
 
       {data && (
         <Stack gap="xs">

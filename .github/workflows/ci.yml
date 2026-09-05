@@ -61,6 +61,15 @@ jobs:
       - name: Type check
         run: uv run mypy
 
+      - name: Dependency vulnerability scan
+        # README used to say "run uvx pip-audit before a real deployment" as
+        # a manual step -- nothing actually ran it. `--with pip-audit` audits
+        # what `uv sync` just installed in this job's own venv (no separate
+        # resolve against PyPI needed). Doesn't fail the build -- a new CVE
+        # landing in a transitive dependency shouldn't block an unrelated PR
+        # -- it's here so a scan happens on every push instead of never.
+        run: uv run --with pip-audit pip-audit --strict || echo "::warning::pip-audit found issues -- see the step output above"
+
       - name: Run migrations
         run: uv run alembic upgrade head
 
@@ -91,3 +100,5 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
+      - name: Dependency vulnerability scan
+        run: npm audit --omit=dev || echo "::warning::npm audit found issues -- see the step output above"

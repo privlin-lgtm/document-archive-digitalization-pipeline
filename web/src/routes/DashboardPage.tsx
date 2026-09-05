@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Badge, Button, Card, FileButton, Group, Loader, Paper, SimpleGrid, Stack, Table, Text } from "@mantine/core";
+import { Alert, Badge, Button, Card, FileButton, Group, Loader, Paper, SimpleGrid, Stack, Table, Text } from "@mantine/core";
 import { IconUpload } from "@tabler/icons-react";
 import { useStats } from "../hooks/useStats";
 import { useDocuments, useUploadDocuments } from "../hooks/useDocuments";
@@ -23,8 +23,8 @@ const PAGE_SIZE = 20;
 
 export function DashboardPage() {
   const [offset, setOffset] = useState(0);
-  const { data: stats } = useStats();
-  const { data: documents, isLoading } = useDocuments({ limit: PAGE_SIZE, offset });
+  const { data: stats, error: statsError } = useStats();
+  const { data: documents, isLoading, error: documentsError } = useDocuments({ limit: PAGE_SIZE, offset });
   const uploadDocuments = useUploadDocuments();
   const resetRef = useRef<() => void>(null);
   const navigate = useNavigate();
@@ -49,20 +49,30 @@ export function DashboardPage() {
         </FileButton>
       </Group>
 
-      {stats && (
-        <SimpleGrid cols={{ base: 2, sm: 4 }}>
-          <StatCard label="Total documents" value={stats.total_documents} />
-          <StatCard label="Indexed" value={stats.documents_indexed} />
-          <StatCard label="Needing review" value={stats.documents_needing_review} />
-          <StatCard label="Open flags" value={stats.open_review_flags} />
-        </SimpleGrid>
+      {statsError ? (
+        <Alert color="red" title="Failed to load dashboard stats">
+          {statsError instanceof Error ? statsError.message : "Unknown error"}
+        </Alert>
+      ) : (
+        stats && (
+          <SimpleGrid cols={{ base: 2, sm: 4 }}>
+            <StatCard label="Total documents" value={stats.total_documents} />
+            <StatCard label="Indexed" value={stats.documents_indexed} />
+            <StatCard label="Needing review" value={stats.documents_needing_review} />
+            <StatCard label="Open flags" value={stats.open_review_flags} />
+          </SimpleGrid>
+        )
       )}
 
       <Paper withBorder p="md" radius="sm">
         <Text fw={600} mb="sm">
           Recent documents
         </Text>
-        {isLoading ? (
+        {documentsError ? (
+          <Alert color="red" title="Failed to load documents">
+            {documentsError instanceof Error ? documentsError.message : "Unknown error"}
+          </Alert>
+        ) : isLoading ? (
           <Loader size="sm" />
         ) : (
           <Table striped highlightOnHover>
