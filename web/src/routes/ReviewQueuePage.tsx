@@ -38,15 +38,19 @@ export function ReviewQueuePage() {
     updateFlag.mutate({ flagId: current.id, body: { status } });
   }
 
+  // Bare single-letter shortcuts collide with screen readers' own browse-mode
+  // quick-nav keys (WCAG 2.1.4) -- requiring Alt keeps the shortcuts without
+  // stealing keys assistive tech already uses. Arrow keys/Enter are left
+  // bare: they aren't printable-character shortcuts, so 2.1.4 doesn't apply.
   useHotkeys([
-    ["j", () => move(1)],
+    ["alt+j", () => move(1)],
     ["ArrowDown", () => move(1)],
-    ["k", () => move(-1)],
+    ["alt+k", () => move(-1)],
     ["ArrowUp", () => move(-1)],
-    ["s", () => move(1)],
-    ["a", () => resolve("resolved")],
-    ["r", () => resolve("resolved")],
-    ["x", () => resolve("dismissed")],
+    ["alt+s", () => move(1)],
+    ["alt+a", () => resolve("resolved")],
+    ["alt+r", () => resolve("resolved")],
+    ["alt+x", () => resolve("dismissed")],
     [
       "Enter",
       () => {
@@ -77,19 +81,19 @@ export function ReviewQueuePage() {
           Review queue ({data?.total ?? 0} open)
         </Text>
         <Group gap={6}>
-          <Kbd>j</Kbd>/<Kbd>k</Kbd>{" "}
+          <Kbd>Alt</Kbd>+<Kbd>J</Kbd>/<Kbd>Alt</Kbd>+<Kbd>K</Kbd>{" "}
           <Text size="xs" c="dimmed" span>
             next/prev
           </Text>
-          <Kbd>a</Kbd>{" "}
+          <Kbd>Alt</Kbd>+<Kbd>A</Kbd>{" "}
           <Text size="xs" c="dimmed" span>
             approve
           </Text>
-          <Kbd>x</Kbd>{" "}
+          <Kbd>Alt</Kbd>+<Kbd>X</Kbd>{" "}
           <Text size="xs" c="dimmed" span>
             dismiss
           </Text>
-          <Kbd>s</Kbd>{" "}
+          <Kbd>Alt</Kbd>+<Kbd>S</Kbd>{" "}
           <Text size="xs" c="dimmed" span>
             skip
           </Text>

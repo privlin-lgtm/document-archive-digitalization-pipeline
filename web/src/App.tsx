@@ -6,6 +6,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { NavLink as RouterNavLink, Route, Routes, useLocation } from "react-router-dom";
 import { api } from "./api/client";
 import { LoginPage } from "./routes/LoginPage";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 
 // Lazy: each of these only needs to load once a reviewer picks that page,
 // not as part of the single bundle every visitor downloads just to reach
@@ -47,6 +48,7 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
 
 function AuthenticatedApp({ reviewer }: { reviewer: string }) {
   const queryClient = useQueryClient();
+  const location = useLocation();
   // Mobile nav starts closed; the burger (shown only below the "sm"
   // breakpoint) toggles it, and picking a page closes it again -- without
   // this, AppShell's navbar has no collapse state at all below the
@@ -94,33 +96,35 @@ function AuthenticatedApp({ reviewer }: { reviewer: string }) {
             </Group>
           }
         >
-          <Routes>
-            <Route
-              path="/"
-              element={
-                <div className="page-scroll">
-                  <DashboardPage />
-                </div>
-              }
-            />
-            <Route path="/documents/:documentId" element={<DocumentViewPage />} />
-            <Route
-              path="/review"
-              element={
-                <div className="page-scroll">
-                  <ReviewQueuePage />
-                </div>
-              }
-            />
-            <Route
-              path="/search"
-              element={
-                <div className="page-scroll">
-                  <SearchPage />
-                </div>
-              }
-            />
-          </Routes>
+          <ErrorBoundary key={location.pathname}>
+            <Routes>
+              <Route
+                path="/"
+                element={
+                  <div className="page-scroll">
+                    <DashboardPage />
+                  </div>
+                }
+              />
+              <Route path="/documents/:documentId" element={<DocumentViewPage />} />
+              <Route
+                path="/review"
+                element={
+                  <div className="page-scroll">
+                    <ReviewQueuePage />
+                  </div>
+                }
+              />
+              <Route
+                path="/search"
+                element={
+                  <div className="page-scroll">
+                    <SearchPage />
+                  </div>
+                }
+              />
+            </Routes>
+          </ErrorBoundary>
         </Suspense>
       </AppShell.Main>
     </AppShell>

@@ -254,9 +254,11 @@ export function EntityPanel({ pages, documentId }: { pages: PageOut[]; documentI
     el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [selectedEntityId, selectedRegionId]);
 
+  // Bare "e" collides with screen readers' own browse-mode quick-nav keys
+  // (WCAG 2.1.4); Alt+E keeps the shortcut without stealing that key.
   useHotkeys([
     [
-      "e",
+      "alt+e",
       () => {
         if (selectedEntityId) setEditingEntityId(selectedEntityId);
       },

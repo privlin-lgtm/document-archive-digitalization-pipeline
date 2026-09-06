@@ -75,9 +75,15 @@ async def _enforce(request: Request, limit_spec: str) -> None:
 
     try:
         client = _get_redis_client()
-        count = client.incr(key)
-        if count == 1:
-            client.expire(key, window_seconds)
+        # INCR and EXPIRE run in one MULTI/EXEC pipeline, and EXPIRE runs on
+        # every hit (not just when count == 1): if they were two separate
+        # round trips and EXPIRE alone failed (a transient blip, not a full
+        # outage), the key INCR just created would keep no TTL and never get
+        # cleaned up -- one leaked ratelimit:* key per occurrence, forever.
+        pipe = client.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, window_seconds)
+        count, _ = pipe.execute()
     except Exception:
         logger.warning(
             "rate limit check failed (Redis unreachable?)",

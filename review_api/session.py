@@ -19,7 +19,17 @@ class SessionError(ValueError):
 
 
 def _secret() -> bytes:
-    return get_settings().review_api_token.encode()
+    # Derived from, not equal to, the raw token: review_api.auth compares
+    # the raw token directly against what a reviewer types to log in, so
+    # signing sessions with that same value means a leak of one secret is a
+    # leak of both, with no way to rotate the login credential independently
+    # of every already-issued session (or vice versa). HMAC-deriving with a
+    # fixed, distinct context label keeps the two cryptographically separate
+    # even though both still ultimately trace back to one configured value
+    # -- real independent rotation would need its own setting, which is a
+    # bigger config/deployment change than this local fix makes alone.
+    token = get_settings().review_api_token.encode()
+    return hmac.new(token, b"archive-session-signing-key-v1", hashlib.sha256).digest()
 
 
 def issue_session(reviewer: str) -> str:

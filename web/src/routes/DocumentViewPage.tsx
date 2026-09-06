@@ -135,15 +135,19 @@ export function DocumentViewPage() {
     );
   }
 
+  // Bare single-letter shortcuts collide with screen readers' own browse-mode
+  // quick-nav keys (WCAG 2.1.4) -- requiring Alt keeps the shortcuts without
+  // stealing keys assistive tech already uses. Arrow keys/Escape are left
+  // bare: they aren't printable-character shortcuts, so 2.1.4 doesn't apply.
   useHotkeys([
-    ["j", () => moveFlag(1), { preventDefault: true }],
+    ["alt+j", () => moveFlag(1), { preventDefault: true }],
     ["ArrowDown", () => moveFlag(1), { preventDefault: true }],
-    ["k", () => moveFlag(-1), { preventDefault: true }],
+    ["alt+k", () => moveFlag(-1), { preventDefault: true }],
     ["ArrowUp", () => moveFlag(-1), { preventDefault: true }],
-    ["a", () => resolveCurrent("resolved")],
-    ["r", () => resolveCurrent("resolved")],
-    ["x", () => resolveCurrent("dismissed")],
-    ["s", () => moveFlag(1), { preventDefault: true }],
+    ["alt+a", () => resolveCurrent("resolved")],
+    ["alt+r", () => resolveCurrent("resolved")],
+    ["alt+x", () => resolveCurrent("dismissed")],
+    ["alt+s", () => moveFlag(1), { preventDefault: true }],
     [
       "Escape",
       () => {
@@ -228,20 +232,20 @@ export function DocumentViewPage() {
             </Text>
           </Group>
           <Group gap={6} wrap="nowrap">
-            <Kbd size="xs">j</Kbd>
-            <Kbd size="xs">k</Kbd>
+            <Kbd size="xs">Alt+J</Kbd>
+            <Kbd size="xs">Alt+K</Kbd>
             <Text size="xs" c="dimmed">
               flag
             </Text>
-            <Kbd size="xs">a</Kbd>
+            <Kbd size="xs">Alt+A</Kbd>
             <Text size="xs" c="dimmed">
               approve
             </Text>
-            <Kbd size="xs">s</Kbd>
+            <Kbd size="xs">Alt+S</Kbd>
             <Text size="xs" c="dimmed">
               skip
             </Text>
-            <Kbd size="xs">e</Kbd>
+            <Kbd size="xs">Alt+E</Kbd>
             <Text size="xs" c="dimmed">
               edit
             </Text>
@@ -251,7 +255,7 @@ export function DocumentViewPage() {
         <Group px="md" py={6} justify="space-between" className="document-view-flagbar">
           <OverlayLegend />
           <Group gap={6} wrap="nowrap">
-            <Kbd size="xs">e</Kbd>
+            <Kbd size="xs">Alt+E</Kbd>
             <Text size="xs" c="dimmed">
               edit entity
             </Text>

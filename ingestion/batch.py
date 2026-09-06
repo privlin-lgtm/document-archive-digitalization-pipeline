@@ -121,7 +121,15 @@ def watch_directory(directory: Path, *, concurrency: int, poll_interval: float) 
     seen: set[str] = set()
     logger.info("watching %s every %.0fs for new scans (Ctrl+C to stop)", directory, poll_interval)
     while True:
-        new_paths = [p for p in _discover_images(directory) if p.name not in seen]
+        current = _discover_images(directory)
+        # Drop names no longer present: bounds `seen`'s size to what's
+        # actually in the directory right now (unbounded otherwise, for the
+        # life of a long-running watch process) and, as a side effect, lets
+        # a filename get re-ingested if it disappears and later reappears
+        # (e.g. replaced with different content) instead of being skipped
+        # forever just because that name was seen once.
+        seen &= {p.name for p in current}
+        new_paths = [p for p in current if p.name not in seen]
         if new_paths:
             with ThreadPoolExecutor(max_workers=concurrency) as executor:
                 futures = {executor.submit(ingest_one, p): p for p in new_paths}

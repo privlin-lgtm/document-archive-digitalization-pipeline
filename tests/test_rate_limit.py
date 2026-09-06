@@ -83,31 +83,34 @@ class TestEnforceRateLimit:
 
     async def test_allows_requests_under_the_limit(self, monkeypatch):
         fake_redis = MagicMock()
-        fake_redis.incr.return_value = 1
+        fake_redis.pipeline.return_value.execute.return_value = [1, True]
         monkeypatch.setattr(rate_limit, "_get_redis_client", lambda: fake_redis)
 
         await rate_limit.enforce_rate_limit(_make_request())  # must not raise
 
-        fake_redis.expire.assert_called_once()  # first hit in the window -> TTL set
+        fake_redis.pipeline.return_value.expire.assert_called_once()
 
     async def test_rejects_requests_over_the_limit(self, monkeypatch):
         fake_redis = MagicMock()
         limit, _ = rate_limit.parse_rate_limit(settings.rate_limit_default)
-        fake_redis.incr.return_value = limit + 1
+        fake_redis.pipeline.return_value.execute.return_value = [limit + 1, True]
         monkeypatch.setattr(rate_limit, "_get_redis_client", lambda: fake_redis)
 
         with pytest.raises(HTTPException) as exc_info:
             await rate_limit.enforce_rate_limit(_make_request())
         assert exc_info.value.status_code == 429
 
-    async def test_does_not_reset_ttl_on_every_hit(self, monkeypatch):
+    async def test_sets_ttl_on_every_hit_not_just_the_first(self, monkeypatch):
+        # INCR and EXPIRE run in the same pipeline on every call now (not
+        # gated on count == 1) so a lost/failed EXPIRE round trip can never
+        # leave a counter key with no TTL -- see rate_limit.py's comment.
         fake_redis = MagicMock()
-        fake_redis.incr.return_value = 2  # not the first hit in this window
+        fake_redis.pipeline.return_value.execute.return_value = [2, True]  # not the first hit
         monkeypatch.setattr(rate_limit, "_get_redis_client", lambda: fake_redis)
 
         await rate_limit.enforce_rate_limit(_make_request())
 
-        fake_redis.expire.assert_not_called()
+        fake_redis.pipeline.return_value.expire.assert_called_once()
 
     async def test_fails_open_when_redis_is_unreachable(self, monkeypatch):
         def broken():
@@ -158,7 +161,7 @@ class TestEnforceRateLimit:
     async def test_the_circuit_closes_again_after_the_cooldown(self, monkeypatch):
         monkeypatch.setattr(rate_limit, "_circuit_open_until", 0.0)
         fake_redis = MagicMock()
-        fake_redis.incr.return_value = 1
+        fake_redis.pipeline.return_value.execute.return_value = [1, True]
         monkeypatch.setattr(rate_limit, "_get_redis_client", lambda: fake_redis)
 
         # Simulate "the cooldown already elapsed" by opening the circuit in
@@ -167,12 +170,34 @@ class TestEnforceRateLimit:
 
         await rate_limit.enforce_rate_limit(_make_request())
 
-        fake_redis.incr.assert_called_once()  # circuit closed -> Redis was actually checked
+        fake_redis.pipeline.assert_called_once()  # circuit closed -> Redis was actually checked
 
     async def test_different_paths_use_independent_buckets(self, monkeypatch):
         counts: dict[str, int] = {}
 
+        class FakePipeline:
+            def __init__(self, parent: "FakeRedis") -> None:
+                self._parent = parent
+                self._ops: list[tuple[str, str]] = []
+
+            def incr(self, key):
+                self._ops.append(("incr", key))
+                return self
+
+            def expire(self, key, seconds):
+                self._ops.append(("expire", key))
+                return self
+
+            def execute(self):
+                return [
+                    self._parent.incr(key) if op == "incr" else self._parent.expire(key, 0)
+                    for op, key in self._ops
+                ]
+
         class FakeRedis:
+            def pipeline(self):
+                return FakePipeline(self)
+
             def incr(self, key):
                 counts[key] = counts.get(key, 0) + 1
                 return counts[key]
