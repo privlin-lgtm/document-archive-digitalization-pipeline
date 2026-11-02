@@ -117,6 +117,7 @@ files = [
     "pipeline",
     "ingestion",
     "scripts",
+    "eval",
 ]
 
 [tool.ruff.lint]

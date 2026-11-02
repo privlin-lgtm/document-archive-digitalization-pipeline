@@ -1,0 +1,359 @@
+"""Calibrate on real scans: a drop-in folder plus one command.
+
+    python -m eval.calibrate init            # create eval/real/{images,ground_truth,label-pages,reports}
+    python -m eval.calibrate stubs           # blank ground-truth file for every new scan
+    python -m eval.calibrate run             # score everything marked "done", write a dated report
+    python -m eval.calibrate seed-synthetic  # copy the synthetic fixtures in, to check the plumbing
+
+Every subcommand takes `--root DIR` (default: $EVAL_REAL_DIR, else
+eval/real next to this file). The folder layout, ground-truth format and
+labeling workflow are documented in eval/real/README.md. Everything in
+eval/real/ except that README is gitignored and dockerignored: real client
+scans and anything derived from them (label pages, overlays, reports) must
+never be committed or baked into an image.
+
+Like eval.report, this is a standalone measurement tool: it calls
+ocr.preprocess, ocr.layout, ocr.engine and extraction.entities directly
+and needs no Postgres or Redis.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import cv2
+import numpy as np
+
+from eval.ground_truth import (
+    STATUS_DONE,
+    STATUS_TODO,
+    GroundTruthError,
+    GroundTruthExample,
+    list_images,
+    load_drop_in,
+    load_ground_truth,
+)
+
+EVAL_DIR = Path(__file__).resolve().parent
+DEFAULT_ROOT = EVAL_DIR / "real"
+SUBDIRS = ("images", "ground_truth", "label-pages", "reports")
+
+# extraction.entities reads config.Settings, which insists on DATABASE_URL and
+# REVIEW_API_TOKEN even though the eval never touches the database or the API.
+# Placeholders let the harness run with no .env at all; real values (from the
+# environment) always win. Neither is used for anything here.
+_SETTINGS_PLACEHOLDERS = {
+    "DATABASE_URL": "postgresql+psycopg://eval-unused@localhost:5432/eval_unused",
+    "REVIEW_API_TOKEN": "eval-harness-placeholder-not-used-for-anything",
+}
+
+
+def default_root() -> Path:
+    env = os.environ.get("EVAL_REAL_DIR")
+    return Path(env) if env else DEFAULT_ROOT
+
+
+def slugify(name: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-").lower()
+    return slug or "scan"
+
+
+def init_layout(root: Path) -> list[Path]:
+    """Creates the drop-in subfolders. Returns the ones that were new."""
+    created = []
+    for sub in SUBDIRS:
+        path = root / sub
+        if not path.is_dir():
+            path.mkdir(parents=True, exist_ok=True)
+            created.append(path)
+    return created
+
+
+def _read_image(path: Path) -> np.ndarray:
+    # cv2.imread reads the first frame of a multi-page TIFF only; multi-page
+    # input is a follow-up (see eval/real/README.md).
+    image = cv2.imread(str(path))
+    if image is None:
+        raise ValueError(f"could not read image: {path}")
+    return image
+
+
+def _preprocessed(path: Path) -> np.ndarray:
+    from ocr.preprocess import preprocess
+
+    return preprocess(_read_image(path)).image
+
+
+def stub_entry(image_name: str, example_id: str) -> dict[str, Any]:
+    return {
+        "id": example_id,
+        "image": image_name,
+        "status": STATUS_TODO,
+        "text": "",
+        "entities": [],
+        "regions": None,
+        "notes": "",
+    }
+
+
+def create_stubs(root: Path, *, prefill_regions: bool = False) -> list[Path]:
+    """Writes ground_truth/<id>.json for every image that has none yet.
+
+    Never overwrites an existing ground-truth file. Also writes
+    label-pages/<id>.png, the preprocessed page that region boxes are
+    measured against, and records its size in the stub. With
+    `prefill_regions`, the stub's "regions" list starts as whatever
+    detect_regions finds today, so labeling is correcting boxes and types
+    rather than drawing every one from scratch.
+    """
+    init_layout(root)
+    gt_dir = root / "ground_truth"
+    referenced: set[str] = set()
+    taken_ids: set[str] = set()
+    for path in gt_dir.glob("*.json"):
+        taken_ids.add(path.stem)
+        try:
+            entry = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict):
+            if isinstance(entry.get("image"), str):
+                referenced.add(entry["image"])
+            if isinstance(entry.get("id"), str):
+                taken_ids.add(entry["id"])
+
+    written = []
+    for image_path in list_images(root / "images"):
+        if image_path.name in referenced:
+            continue
+        example_id = base = slugify(image_path.stem)
+        n = 2
+        while example_id in taken_ids:
+            example_id = f"{base}-{n}"
+            n += 1
+        taken_ids.add(example_id)
+
+        entry = stub_entry(image_path.name, example_id)
+        page = _preprocessed(image_path)
+        cv2.imwrite(str(root / "label-pages" / f"{example_id}.png"), page)
+        entry["page_size"] = [int(page.shape[1]), int(page.shape[0])]
+        if prefill_regions:
+            from ocr.layout import detect_regions
+
+            entry["regions"] = [
+                {"type": r.region_type, "bbox": list(r.bbox)} for r in detect_regions(page)
+            ]
+
+        out = gt_dir / f"{example_id}.json"
+        out.write_text(json.dumps(entry, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        written.append(out)
+    return written
+
+
+def seed_synthetic(root: Path, fixtures_dir: Path = EVAL_DIR / "fixtures") -> list[Path]:
+    """Copies the checked-in synthetic fixtures into the drop-in layout, as if
+    they were real scans that had been fully labeled. Region labels are
+    whatever detect_regions finds today (the fixtures have none of their
+    own), so layout scores here prove the wiring, not the segmenter.
+    """
+    from ocr.layout import detect_regions
+
+    init_layout(root)
+    written = []
+    for example in load_ground_truth(fixtures_dir):
+        target_image = root / "images" / example.image_path.name
+        shutil.copyfile(example.image_path, target_image)
+        page = _preprocessed(target_image)
+        cv2.imwrite(str(root / "label-pages" / f"{example.id}.png"), page)
+        entry = stub_entry(example.image_path.name, example.id)
+        entry.update(
+            status=STATUS_DONE,
+            text=example.text,
+            entities=[{"type": e.entity_type, "value": e.value} for e in example.entities],
+            regions=[{"type": r.region_type, "bbox": list(r.bbox)} for r in detect_regions(page)],
+            page_size=[int(page.shape[1]), int(page.shape[0])],
+            notes="synthetic fixture copied by `python -m eval.calibrate seed-synthetic`",
+        )
+        out = root / "ground_truth" / f"{example.id}.json"
+        out.write_text(json.dumps(entry, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        written.append(out)
+    return written
+
+
+def _draw_overlay(
+    example: GroundTruthExample, predicted: list[tuple[str, tuple[int, int, int, int]]], out: Path
+) -> None:
+    page = _preprocessed(example.image_path)
+    canvas = cv2.cvtColor(page, cv2.COLOR_GRAY2BGR) if page.ndim == 2 else page.copy()
+    for region in example.regions or []:
+        x, y, w, h = region.bbox
+        cv2.rectangle(canvas, (x, y), (x + w, y + h), (0, 160, 0), 3)
+        cv2.putText(
+            canvas,
+            region.region_type,
+            (x, y + h + 18),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 160, 0),
+            2,
+        )
+    for region_type, (x, y, w, h) in predicted:
+        cv2.rectangle(canvas, (x, y), (x + w, y + h), (0, 0, 220), 2)
+        cv2.putText(
+            canvas, region_type, (x, max(12, y - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 220), 2
+        )
+    cv2.imwrite(str(out), canvas)
+
+
+def run(root: Path, *, overlays: bool = True, now: datetime | None = None) -> Path:
+    """Scores every "done" page and writes reports/<timestamp>/report.{md,json}.
+
+    Returns the report directory. Raises GroundTruthError for malformed
+    ground truth and LookupError when nothing is ready to score.
+    """
+    from eval.calibration_report import render_json, render_markdown
+    from eval.report import evaluate_examples
+
+    for key, value in _SETTINGS_PLACEHOLDERS.items():
+        os.environ.setdefault(key, value)
+
+    drop_in = load_drop_in(root)
+    if not drop_in.examples:
+        raise LookupError(
+            f"nothing to score in {root}: "
+            f'{len(drop_in.pending)} stub(s) still have status "todo", '
+            f"{len(drop_in.unlabeled_images)} image(s) have no ground-truth file. "
+            'Fill in a stub and set "status": "done", then run again.'
+        )
+
+    report = evaluate_examples(drop_in.examples)
+
+    warnings = []
+    by_id = {e.id: e for e in drop_in.examples}
+    for result in report.results:
+        example = by_id[result.example_id]
+        expected, actual = example.page_size, result.page_size
+        if example.regions is not None and expected and actual and actual != expected:
+            warnings.append(
+                f"{result.example_id}: regions were labeled on a {expected[0]}x{expected[1]} page but "
+                f"preprocessing now produces {actual[0]}x{actual[1]} (preprocessing changed?), so "
+                "layout scores for this page may be off. Re-check its boxes against a fresh label page."
+            )
+
+    generated_at = now or datetime.now().astimezone()
+    report_dir = root / "reports" / generated_at.strftime("%Y-%m-%d_%H%M%S")
+    report_dir.mkdir(parents=True, exist_ok=False)
+    overlays_dir = None
+    if overlays:
+        overlays_dir = report_dir / "overlays"
+        overlays_dir.mkdir()
+        for result in report.results:
+            _draw_overlay(
+                by_id[result.example_id],
+                result.predicted_regions,
+                overlays_dir / f"{result.example_id}.png",
+            )
+
+    context = {
+        "root": root,
+        "generated_at": generated_at,
+        "pending": drop_in.pending,
+        "unlabeled_images": drop_in.unlabeled_images,
+        "warnings": warnings,
+    }
+    markdown = render_markdown(report, overlays_dir=overlays_dir, **context)  # type: ignore[arg-type]
+    (report_dir / "report.md").write_text(markdown + "\n", encoding="utf-8")
+    data = render_json(report, **context)  # type: ignore[arg-type]
+    (report_dir / "report.json").write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    return report_dir
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="python -m eval.calibrate", description=__doc__.split("\n\n")[0]
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    def add_root(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--root", type=Path, default=None, help="drop-in folder (default: eval/real)"
+        )
+
+    add_root(sub.add_parser("init", help="create the drop-in folder layout"))
+    p_stubs = sub.add_parser("stubs", help="write a blank ground-truth file for each new scan")
+    add_root(p_stubs)
+    p_stubs.add_argument(
+        "--prefill-regions",
+        action="store_true",
+        help="start each stub's regions from what the segmenter finds today",
+    )
+    p_run = sub.add_parser("run", help="score labeled scans and write a dated report")
+    add_root(p_run)
+    p_run.add_argument(
+        "--no-overlays", action="store_true", help="skip the per-page overlay images"
+    )
+    add_root(
+        sub.add_parser("seed-synthetic", help="copy the synthetic fixtures in as labeled scans")
+    )
+
+    args = parser.parse_args(argv)
+    root: Path = (args.root or default_root()).resolve()
+
+    if args.command == "init":
+        created = init_layout(root)
+        print(f"Drop-in folder ready: {root}")
+        for path in created:
+            print(f"  created {path.relative_to(root)}/")
+        print("Next: put scans in images/, then run `python -m eval.calibrate stubs`.")
+        return 0
+
+    if args.command == "stubs":
+        written = create_stubs(root, prefill_regions=args.prefill_regions)
+        if not written:
+            print(f"Every image in {root / 'images'} already has a ground-truth file.")
+        for path in written:
+            print(f"  wrote {path.relative_to(root)}")
+        if written:
+            print(
+                'Next: fill in each file in ground_truth/, set "status": "done", '
+                "then run `python -m eval.calibrate run`."
+            )
+        return 0
+
+    if args.command == "seed-synthetic":
+        written = seed_synthetic(root)
+        print(f"Copied {len(written)} synthetic fixture(s) into {root}.")
+        return 0
+
+    try:
+        report_dir = run(root, overlays=not args.no_overlays)
+    except GroundTruthError as exc:
+        print("Ground truth needs fixing before the run can start:", file=sys.stderr)
+        for problem in exc.problems:
+            print(f"  - {problem}", file=sys.stderr)
+        return 2
+    except LookupError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    markdown = (report_dir / "report.md").read_text(encoding="utf-8")
+    summary = markdown.split("\n## ", 2)
+    print("\n## ".join(summary[:2]).rstrip())
+    print()
+    print(f"Full report: {report_dir / 'report.md'}")
+    print(f"JSON:        {report_dir / 'report.json'}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

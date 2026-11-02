@@ -309,6 +309,33 @@ change (a new OCR backend, a regex tweak, a threshold change) objectively
 instead of by eye — see `eval/README.md` for the ground-truth format and
 how to add new examples.
 
+### Calibrating on real scans
+
+The checked-in fixtures are synthetic. To measure the pipeline on real
+archive scans, use the drop-in folder `eval/real/` (gitignored and
+dockerignored, so client scans are never committed or built into an image):
+
+```bash
+python -m eval.calibrate init     # once: creates eval/real/{images,ground_truth,label-pages,reports}
+# copy scans (one page per image) into eval/real/images/
+python -m eval.calibrate stubs    # blank ground-truth file per new scan (--prefill-regions to start from today's boxes)
+# fill in eval/real/ground_truth/<id>.json, set "status": "done"
+python -m eval.calibrate run      # writes eval/real/reports/<date>_<time>/report.md + report.json + overlays/
+```
+
+Or in Docker, with no database, `.env` or network involved:
+
+```bash
+docker compose run --rm --build eval
+```
+
+The report covers CER/WER, per-entity precision/recall/F1, per-region
+layout detection and classification (with a confusion matrix) when region
+boxes are labeled, the five worst pages with what went wrong on each, and
+which scans still need ground truth. `python -m eval.calibrate seed-synthetic`
+copies the synthetic fixtures into the folder to check the plumbing. Full
+workflow and ground-truth format: [`eval/real/README.md`](eval/real/README.md).
+
 ## Project layout
 
 ```
@@ -322,7 +349,8 @@ web/           annotation UI — React/TypeScript, standalone Vite app (see web/
 tests/         pytest suite (backend)
 alembic/       DB migrations
 scripts/       synthetic data seeding (scale) + pipeline smoke test (correctness)
-eval/          OCR/extraction quality evaluation harness (see eval/README.md)
+eval/          OCR/extraction/layout quality evaluation harness (see eval/README.md);
+               eval/real/ is the gitignored drop-in folder for real scans
 .github/       CI (lint + pytest against a real Postgres, web/ build) -- workflows/ci.yml
 config.py      pydantic-settings config, read from .env
 worker.py      Celery app + task definitions for async pipeline jobs
