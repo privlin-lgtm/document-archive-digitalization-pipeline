@@ -11,7 +11,8 @@ from sqlalchemy.orm import Session, selectinload
 
 from config import get_settings
 from ingestion.upload import UnsafeFilenameError, UploadTooLargeError, save_raw_image
-from ingestion.validate import InvalidImageError, decode_and_check_image, read_upload_bounded
+from ingestion.validate import InvalidImageError, check_document, read_upload_bounded
+from ocr.pages import is_pdf_path
 from review_api.auth import require_api_token
 from review_api.rate_limit import enforce_rate_limit
 from review_api.schemas import (
@@ -65,7 +66,13 @@ def _enqueue(document: Document, db: Session) -> bool:
 
 @router.post("", status_code=201, response_model=list[DocumentCreated])
 async def upload_documents(
-    files: list[UploadFile] = File(..., description="One or more scanned document images"),
+    files: list[UploadFile] = File(
+        ...,
+        description=(
+            "One or more scanned documents: images (PNG/JPEG/BMP), multi-page TIFFs or PDFs. "
+            "Each file becomes one document with one page per TIFF frame or PDF page."
+        ),
+    ),
     db: Session = Depends(get_db),
 ) -> list[DocumentCreated]:
     settings = get_settings()
@@ -82,7 +89,7 @@ async def upload_documents(
     for upload in files:
         try:
             content = await read_upload_bounded(upload, settings.max_upload_size_bytes)
-            decode_and_check_image(content)
+            check_document(content)
         except InvalidImageError as exc:
             raise HTTPException(status_code=400, detail=f"{upload.filename or 'upload'!r}: {exc}") from exc
 
@@ -249,13 +256,22 @@ def get_document_image(
         raise HTTPException(status_code=404, detail="document not found")
 
     page_row = db.scalar(select(Page).where(Page.document_id == document.id, Page.page_number == page))
-    stored = (page_row.processed_image_path if page_row else None) or document.processed_image_path or document.raw_image_path
+    stored = page_row.processed_image_path if page_row else None
+    if stored is None and page == 1:
+        stored = document.processed_image_path or document.raw_image_path
+    if stored is None:
+        # Pages after the first only exist once the pipeline has rendered them.
+        raise HTTPException(status_code=404, detail=f"page {page} has no processed image yet")
     try:
         image_path = confined_path(stored)
     except UnsafeStoragePath:
         raise HTTPException(status_code=403, detail="invalid image path") from None
     if not image_path.is_file():
         raise HTTPException(status_code=404, detail="image file not found on disk")
+    if is_pdf_path(str(image_path)):
+        # A not-yet-processed PDF upload: the raw file isn't something an
+        # <img> can show, so wait for the pipeline's rendered page.
+        raise HTTPException(status_code=404, detail=f"page {page} has no processed image yet")
 
     if not annotate:
         return FileResponse(image_path)

@@ -32,6 +32,8 @@ export interface ImageCanvasHandle {
 
 interface ImageCanvasProps {
   documentId: string;
+  /** 1-based page number; regions must be this page's regions only. */
+  page?: number;
   regions: RegionOut[];
   flagsByRegionId: Map<string, FlagType>;
   correctedRegionIds: Set<string>;
@@ -95,12 +97,13 @@ function panRegionIntoView(view: ViewState, region: RegionOut, container: DOMRec
  */
 export function ImageCanvas({
   documentId,
+  page = 1,
   regions,
   flagsByRegionId,
   correctedRegionIds,
   ref,
 }: ImageCanvasProps) {
-  const { imageUrl, isLoading, error } = useDocumentImage(documentId, false);
+  const { imageUrl, isLoading, error } = useDocumentImage(documentId, false, page);
   const selectedRegionId = useSelectionStore((s) => s.selectedRegionId);
   const selectedEntityId = useSelectionStore((s) => s.selectedEntityId);
   const hoveredRegionId = useSelectionStore((s) => s.hoveredRegionId);
@@ -289,7 +292,7 @@ export function ImageCanvas({
       >
         <img
           src={imageUrl}
-          alt="Scanned document"
+          alt={`Scanned document, page ${page}`}
           draggable={false}
           onLoad={(event) => {
             const img = event.currentTarget;

@@ -20,7 +20,7 @@ from ingestion import validate
 
 
 def fake_settings(**overrides) -> SimpleNamespace:
-    base = {"max_image_pixels": 40_000_000}
+    base = {"max_image_pixels": 40_000_000, "max_pages_per_document": 200, "pdf_render_dpi": 300}
     base.update(overrides)
     return SimpleNamespace(**base)
 

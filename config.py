@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     max_files_per_upload: int = 20
     # Reject decoded images above this many pixels (decompression-bomb cap).
     max_image_pixels: int = 40_000_000
+    # Multi-page sources (PDFs, multi-frame TIFFs): uploads with more pages
+    # than this are rejected, so one file can't queue unbounded OCR work.
+    # max_image_pixels above applies to every page/frame, not just the first.
+    max_pages_per_document: int = 200
+    # PDF pages are rasterised at this DPI before OCR (300 is the usual
+    # archival/OCR scanning resolution). A page that would exceed
+    # max_image_pixels at this DPI is rendered at a lower DPI instead.
+    pdf_render_dpi: int = 300
     # When True (production default), Redis rate-limit failures reject
     # mutating requests instead of failing open. None means "derive from
     # app_env" (see the validator below) -- .env.example ships this blank

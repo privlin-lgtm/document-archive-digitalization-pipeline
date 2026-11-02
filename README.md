@@ -22,9 +22,16 @@ search, and surfaces low-confidence results for human review.
 
 ## Pipeline stages
 
-1. **Upload** (`ingestion/`) — a scanned image is received via the API and
-   written to the configured storage backend (local disk or S3); a `documents`
-   row is created with status `uploaded`.
+1. **Upload** (`ingestion/`) — a scan is received via the API (or the batch
+   CLI) and written to the configured storage backend (local disk or S3); a
+   `documents` row is created with status `uploaded`. Single images
+   (PNG/JPEG/BMP/TIFF), multi-page TIFFs and multi-page PDFs are accepted:
+   each TIFF frame or PDF page becomes its own `pages` row, OCR'd, extracted,
+   flagged and reviewed page by page. PDFs are rasterised at
+   `PDF_RENDER_DPI` (default 300) by `ocr/pages.py` using
+   [pypdfium2](https://github.com/pypdfium2-team/pypdfium2) (Apache-2.0 /
+   BSD-3, bundles Google's BSD-licensed PDFium; chosen over AGPL PyMuPDF and
+   GPL poppler/pdf2image so the pipeline stays safe to ship commercially).
 2. **Preprocess** (`ocr/preprocess.py`) — deskew, denoise, and binarize the
    raw scan so OCR gets a cleaner input, especially for faded/aged paper. Also
    computes a sharpness/contrast quality score to flag likely-poor-OCR scans
@@ -432,7 +439,14 @@ Everything else has a sane default:
 - `MAX_UPLOAD_SIZE_BYTES` — per-file upload size cap
 - `MAX_FILES_PER_UPLOAD` — cap on files accepted in one `POST /documents`
   request (default 20); uploaded content is also checked to be a real,
-  decodable image before it's written to disk or handed to the pipeline
+  decodable image or PDF before it's written to disk or handed to the pipeline
+- `MAX_IMAGE_PIXELS` — per-page pixel cap (default 40M). Checked against
+  every frame of a multi-page TIFF, not just the first; PDF pages that would
+  exceed it are rendered at a lower DPI instead of rejected
+- `MAX_PAGES_PER_DOCUMENT` — PDFs/TIFFs with more pages are rejected at
+  upload (and again by the worker), default 200
+- `PDF_RENDER_DPI` — resolution PDF pages are rasterised at before OCR
+  (default 300)
 - `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` — Redis URLs for the async
   job queue
 - `RATE_LIMIT_REDIS_URL` — Redis URL for `review_api.rate_limit` (a
@@ -476,9 +490,16 @@ it does not return the whole table in one response.
   time rather than an autonomous agent. Everything is functionally wired
   and tested end-to-end against a live backend; the remaining work is feel,
   not plumbing.
-- `pipeline/run.py` works one page per document (`page_number=1`) —
-  nothing upstream splits a multi-page source (e.g. a multi-page TIFF/PDF)
-  into separate pages yet; each upload is treated as a single-page scan.
+- Multi-page PDFs/TIFFs are processed page by page in one pipeline job, so
+  a long document is one long job and worker.py's 840s soft time limit
+  applies to the whole document. Resume is per page, so if a long PDF hits
+  that limit, the job's normal retry carries on from the last finished page
+  (up to 4 attempts in total) rather than starting over; very long
+  documents may still want a higher limit or a per-page job split later. Search results and the
+  review queue still link to the document; the review UI then opens on the
+  page holding the selected flag. PDFs with a text layer are still OCR'd
+  from the rendered image (the embedded text isn't used yet), and
+  password-protected PDFs are rejected at upload.
 - A region's OCR result reloaded from a prior pipeline run (i.e. the
   pipeline resumed after a crash) has no persisted per-word confidences —
   the schema only stores the aggregate — so `detect_low_ocr_confidence`'s

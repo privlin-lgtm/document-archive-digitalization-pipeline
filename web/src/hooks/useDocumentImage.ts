@@ -7,7 +7,7 @@ import { api } from "../api/client";
  * an Authorization header). Revokes the previous URL on change/unmount so
  * blob URLs don't leak.
  */
-export function useDocumentImage(documentId: string | undefined, annotate: boolean) {
+export function useDocumentImage(documentId: string | undefined, annotate: boolean, page = 1) {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -23,7 +23,7 @@ export function useDocumentImage(documentId: string | undefined, annotate: boole
     setIsLoading(true);
     setError(null);
     api
-      .getDocumentImageUrl(documentId, annotate)
+      .getDocumentImageUrl(documentId, annotate, page)
       .then((url) => {
         if (cancelled) {
           URL.revokeObjectURL(url);
@@ -43,7 +43,7 @@ export function useDocumentImage(documentId: string | undefined, annotate: boole
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [documentId, annotate]);
+  }, [documentId, annotate, page]);
 
   return { imageUrl, error, isLoading };
 }
