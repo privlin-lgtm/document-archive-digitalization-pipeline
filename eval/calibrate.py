@@ -1,7 +1,7 @@
 """Calibrate on real scans: a drop-in folder plus one command.
 
     python -m eval.calibrate init            # create eval/real/{images,ground_truth,label-pages,reports}
-    python -m eval.calibrate stubs           # blank ground-truth file for every new scan
+    python -m eval.calibrate stubs           # blank ground-truth file for every new page
     python -m eval.calibrate run             # score everything marked "done", write a dated report
     python -m eval.calibrate seed-synthetic  # copy the synthetic fixtures in, to check the plumbing
 
@@ -11,6 +11,10 @@ labeling workflow are documented in eval/real/README.md. Everything in
 eval/real/ except that README is gitignored and dockerignored: real client
 scans and anything derived from them (label pages, overlays, reports) must
 never be committed or baked into an image.
+
+Scans can be single images, multi-page PDFs or multi-frame TIFFs; pages
+are split with ocr.pages (see eval/page_reader.py) and each page gets its
+own ground-truth file, report row and overlay.
 
 Like eval.report, this is a standalone measurement tool: it calls
 ocr.preprocess, ocr.layout, ocr.engine and extraction.entities directly
@@ -37,10 +41,13 @@ from eval.ground_truth import (
     STATUS_TODO,
     GroundTruthError,
     GroundTruthExample,
+    is_multi_page,
     list_images,
     load_drop_in,
     load_ground_truth,
+    scan_page_count,
 )
+from eval.page_reader import PageReader
 
 EVAL_DIR = Path(__file__).resolve().parent
 DEFAULT_ROOT = EVAL_DIR / "real"
@@ -54,6 +61,19 @@ _SETTINGS_PLACEHOLDERS = {
     "DATABASE_URL": "postgresql+psycopg://eval-unused@localhost:5432/eval_unused",
     "REVIEW_API_TOKEN": "eval-harness-placeholder-not-used-for-anything",
 }
+
+
+def _ensure_settings_env() -> None:
+    for key, value in _SETTINGS_PLACEHOLDERS.items():
+        os.environ.setdefault(key, value)
+
+
+def _max_pages() -> int:
+    """MAX_PAGES_PER_DOCUMENT, the same page limit uploads have."""
+    from config import get_settings
+
+    _ensure_settings_env()
+    return get_settings().max_pages_per_document
 
 
 def default_root() -> Path:
@@ -77,25 +97,17 @@ def init_layout(root: Path) -> list[Path]:
     return created
 
 
-def _read_image(path: Path) -> np.ndarray:
-    # cv2.imread reads the first frame of a multi-page TIFF only; multi-page
-    # input is a follow-up (see eval/real/README.md).
-    image = cv2.imread(str(path))
-    if image is None:
-        raise ValueError(f"could not read image: {path}")
-    return image
-
-
-def _preprocessed(path: Path) -> np.ndarray:
+def _preprocessed(image: np.ndarray) -> np.ndarray:
     from ocr.preprocess import preprocess
 
-    return preprocess(_read_image(path)).image
+    return preprocess(image).image
 
 
-def stub_entry(image_name: str, example_id: str) -> dict[str, Any]:
-    return {
-        "id": example_id,
-        "image": image_name,
+def stub_entry(image_name: str, example_id: str, page: int | None = None) -> dict[str, Any]:
+    entry: dict[str, Any] = {"id": example_id, "image": image_name}
+    if page is not None:
+        entry["page"] = page
+    return entry | {
         "status": STATUS_TODO,
         "text": "",
         "entities": [],
@@ -104,8 +116,20 @@ def stub_entry(image_name: str, example_id: str) -> dict[str, Any]:
     }
 
 
-def create_stubs(root: Path, *, prefill_regions: bool = False) -> list[Path]:
-    """Writes ground_truth/<id>.json for every image that has none yet.
+def create_stubs(
+    root: Path,
+    *,
+    prefill_regions: bool = False,
+    max_pages: int | None = None,
+    skipped: list[str] | None = None,
+) -> list[Path]:
+    """Writes ground_truth/<id>.json for every image (or page) that has none yet.
+
+    A single image gets one stub, ground_truth/<slug>.json, as always. A PDF
+    or multi-frame TIFF gets one stub per page, ground_truth/<slug>.p<N>.json
+    with id "<slug>.p<N>" and "page": N. A scan with more pages than
+    `max_pages` (default MAX_PAGES_PER_DOCUMENT), or one that can't be read,
+    gets no stubs; the reason is appended to `skipped` when given.
 
     Never overwrites an existing ground-truth file. Also writes
     label-pages/<id>.png, the preprocessed page that region boxes are
@@ -116,7 +140,8 @@ def create_stubs(root: Path, *, prefill_regions: bool = False) -> list[Path]:
     """
     init_layout(root)
     gt_dir = root / "ground_truth"
-    referenced: set[str] = set()
+    # (image name, page) already covered; page 1 for single-image entries
+    referenced: set[tuple[str, int]] = set()
     taken_ids: set[str] = set()
     for path in gt_dir.glob("*.json"):
         taken_ids.add(path.stem)
@@ -126,36 +151,74 @@ def create_stubs(root: Path, *, prefill_regions: bool = False) -> list[Path]:
             continue
         if isinstance(entry, dict):
             if isinstance(entry.get("image"), str):
-                referenced.add(entry["image"])
+                page = entry.get("page")
+                referenced.add((entry["image"], page if isinstance(page, int) else 1))
             if isinstance(entry.get("id"), str):
                 taken_ids.add(entry["id"])
 
-    written = []
-    for image_path in list_images(root / "images"):
-        if image_path.name in referenced:
-            continue
-        example_id = base = slugify(image_path.stem)
-        n = 2
+    def unique_id(base: str) -> str:
+        example_id, n = base, 2
         while example_id in taken_ids:
             example_id = f"{base}-{n}"
             n += 1
         taken_ids.add(example_id)
+        return example_id
 
-        entry = stub_entry(image_path.name, example_id)
-        page = _preprocessed(image_path)
-        cv2.imwrite(str(root / "label-pages" / f"{example_id}.png"), page)
-        entry["page_size"] = [int(page.shape[1]), int(page.shape[0])]
+    def write_stub(image_name: str, example_id: str, image: np.ndarray, page: int | None) -> None:
+        entry = stub_entry(image_name, example_id, page)
+        label_page = _preprocessed(image)
+        cv2.imwrite(str(root / "label-pages" / f"{example_id}.png"), label_page)
+        entry["page_size"] = [int(label_page.shape[1]), int(label_page.shape[0])]
         if prefill_regions:
             from ocr.layout import detect_regions
 
             entry["regions"] = [
-                {"type": r.region_type, "bbox": list(r.bbox)} for r in detect_regions(page)
+                {"type": r.region_type, "bbox": list(r.bbox)}
+                for r in detect_regions(label_page)
             ]
-
         out = gt_dir / f"{example_id}.json"
         out.write_text(json.dumps(entry, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         written.append(out)
+
+    written: list[Path] = []
+    with PageReader() as reader:
+        for image_path in list_images(root / "images"):
+            try:
+                multi = is_multi_page(image_path)
+                count = scan_page_count(image_path) if multi else 1
+            except (OSError, RuntimeError, ValueError) as exc:  # corrupt PDF/TIFF: skip it
+                _skip(skipped, f"{image_path.name}: could not read it ({exc.__class__.__name__}: {exc})")
+                continue
+
+            if not multi:
+                if (image_path.name, 1) not in referenced:
+                    image = reader.read(image_path, None)
+                    write_stub(image_path.name, unique_id(slugify(image_path.stem)), image, None)
+                continue
+
+            limit = max_pages if max_pages is not None else _max_pages()
+            if count > limit:
+                _skip(
+                    skipped,
+                    f"{image_path.name}: {count} pages, more than the {limit}-page limit "
+                    "(MAX_PAGES_PER_DOCUMENT); split it into smaller files",
+                )
+                continue
+            if count == 0:
+                _skip(skipped, f"{image_path.name}: has no pages")
+                continue
+            base = slugify(image_path.stem)
+            for page in range(1, count + 1):
+                if (image_path.name, page) in referenced:
+                    continue
+                image = reader.read(image_path, page)
+                write_stub(image_path.name, unique_id(f"{base}.p{page}"), image, page)
     return written
+
+
+def _skip(skipped: list[str] | None, reason: str) -> None:
+    if skipped is not None:
+        skipped.append(reason)
 
 
 def seed_synthetic(root: Path, fixtures_dir: Path = EVAL_DIR / "fixtures") -> list[Path]:
@@ -171,7 +234,7 @@ def seed_synthetic(root: Path, fixtures_dir: Path = EVAL_DIR / "fixtures") -> li
     for example in load_ground_truth(fixtures_dir):
         target_image = root / "images" / example.image_path.name
         shutil.copyfile(example.image_path, target_image)
-        page = _preprocessed(target_image)
+        page = _preprocessed(PageReader().read(target_image, None))
         cv2.imwrite(str(root / "label-pages" / f"{example.id}.png"), page)
         entry = stub_entry(example.image_path.name, example.id)
         entry.update(
@@ -189,9 +252,12 @@ def seed_synthetic(root: Path, fixtures_dir: Path = EVAL_DIR / "fixtures") -> li
 
 
 def _draw_overlay(
-    example: GroundTruthExample, predicted: list[tuple[str, tuple[int, int, int, int]]], out: Path
+    example: GroundTruthExample,
+    predicted: list[tuple[str, tuple[int, int, int, int]]],
+    out: Path,
+    reader: PageReader,
 ) -> None:
-    page = _preprocessed(example.image_path)
+    page = _preprocessed(reader.read(example.image_path, example.page))
     canvas = cv2.cvtColor(page, cv2.COLOR_GRAY2BGR) if page.ndim == 2 else page.copy()
     for region in example.regions or []:
         x, y, w, h = region.bbox
@@ -213,8 +279,18 @@ def _draw_overlay(
     cv2.imwrite(str(out), canvas)
 
 
-def run(root: Path, *, overlays: bool = True, now: datetime | None = None) -> Path:
+def run(
+    root: Path,
+    *,
+    overlays: bool = True,
+    now: datetime | None = None,
+    max_pages: int | None = None,
+) -> Path:
     """Scores every "done" page and writes reports/<timestamp>/report.{md,json}.
+
+    Pages of PDFs and multi-frame TIFFs are scored one by one, exactly like
+    single images; a stub whose "page" doesn't exist in its scan, or a scan
+    over `max_pages` (default MAX_PAGES_PER_DOCUMENT), is a GroundTruthError.
 
     Returns the report directory. Raises GroundTruthError for malformed
     ground truth and LookupError when nothing is ready to score.
@@ -222,10 +298,9 @@ def run(root: Path, *, overlays: bool = True, now: datetime | None = None) -> Pa
     from eval.calibration_report import render_json, render_markdown
     from eval.report import evaluate_examples
 
-    for key, value in _SETTINGS_PLACEHOLDERS.items():
-        os.environ.setdefault(key, value)
-
-    drop_in = load_drop_in(root)
+    _ensure_settings_env()
+    limit = max_pages if max_pages is not None else _max_pages()
+    drop_in = load_drop_in(root, max_pages=limit)
     if not drop_in.examples:
         raise LookupError(
             f"nothing to score in {root}: "
@@ -234,7 +309,12 @@ def run(root: Path, *, overlays: bool = True, now: datetime | None = None) -> Pa
             'Fill in a stub and set "status": "done", then run again.'
         )
 
-    report = evaluate_examples(drop_in.examples)
+    # Sorted by (file, page) so each multi-page scan is rendered in one pass.
+    examples = sorted(drop_in.examples, key=_page_order)
+    with PageReader() as reader:
+        report = evaluate_examples(
+            examples, read_image=lambda e: reader.read(e.image_path, e.page)
+        )
 
     warnings = []
     by_id = {e.id: e for e in drop_in.examples}
@@ -255,12 +335,14 @@ def run(root: Path, *, overlays: bool = True, now: datetime | None = None) -> Pa
     if overlays:
         overlays_dir = report_dir / "overlays"
         overlays_dir.mkdir()
-        for result in report.results:
-            _draw_overlay(
-                by_id[result.example_id],
-                result.predicted_regions,
-                overlays_dir / f"{result.example_id}.png",
-            )
+        with PageReader() as reader:
+            for result in report.results:
+                _draw_overlay(
+                    by_id[result.example_id],
+                    result.predicted_regions,
+                    overlays_dir / f"{result.example_id}.png",
+                    reader,
+                )
 
     context = {
         "root": root,
@@ -276,6 +358,10 @@ def run(root: Path, *, overlays: bool = True, now: datetime | None = None) -> Pa
         json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     return report_dir
+
+
+def _page_order(example: GroundTruthExample) -> tuple[str, int, str]:
+    return (str(example.image_path), example.page or 0, example.id)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -318,9 +404,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "stubs":
-        written = create_stubs(root, prefill_regions=args.prefill_regions)
-        if not written:
-            print(f"Every image in {root / 'images'} already has a ground-truth file.")
+        skipped: list[str] = []
+        written = create_stubs(root, prefill_regions=args.prefill_regions, skipped=skipped)
+        if not written and not skipped:
+            print(f"Every image and page in {root / 'images'} already has a ground-truth file.")
         for path in written:
             print(f"  wrote {path.relative_to(root)}")
         if written:
@@ -328,6 +415,11 @@ def main(argv: list[str] | None = None) -> int:
                 'Next: fill in each file in ground_truth/, set "status": "done", '
                 "then run `python -m eval.calibrate run`."
             )
+        if skipped:
+            print("Skipped (no stubs written for these):", file=sys.stderr)
+            for reason in skipped:
+                print(f"  - {reason}", file=sys.stderr)
+            return 1
         return 0
 
     if args.command == "seed-synthetic":

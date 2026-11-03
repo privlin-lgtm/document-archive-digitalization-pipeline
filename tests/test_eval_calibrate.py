@@ -444,3 +444,198 @@ def test_end_to_end_with_real_tesseract(tmp_path, monkeypatch):
     assert data["summary"]["pages_scored"] == 4
     assert data["summary"]["mean_cer"] < 0.05
     assert data["summary"]["entities_all_types"]["f1"] > 0.9
+
+
+# --------------------------------------------------------------------------
+# multi-page scans: PDFs and multi-frame TIFFs, one stub and one row per page
+
+
+def _text_page(text: str) -> np.ndarray:
+    image = np.full((400, 900), 255, dtype=np.uint8)
+    cv2.putText(image, text, (40, 200), cv2.FONT_HERSHEY_SIMPLEX, 2.0, 0, 5)
+    return image
+
+
+def _write_pdf(path: Path, pages: int = 3) -> None:
+    from PIL import Image
+
+    frames = [Image.fromarray(_text_page(f"Page {i + 1}")).convert("RGB") for i in range(pages)]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frames[0].save(path, "PDF", resolution=300, save_all=True, append_images=frames[1:])
+
+
+def _write_tiff(path: Path, frames: int = 3) -> None:
+    from PIL import Image
+
+    images = [Image.fromarray(_text_page(f"Frame {i + 1}")) for i in range(frames)]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    images[0].save(path, "TIFF", save_all=True, append_images=images[1:], compression="tiff_deflate")
+
+
+def _mark_all_done(root: Path) -> None:
+    for stub in (root / "ground_truth").glob("*.json"):
+        entry = json.loads(stub.read_text("utf-8"))
+        entry.update(status="done", text="Paid to Robert Jones", regions=[])
+        stub.write_text(json.dumps(entry), encoding="utf-8")
+
+
+@pytest.fixture
+def settings_env(monkeypatch):
+    # iter_page_images reads PDF_RENDER_DPI / MAX_IMAGE_PIXELS from settings
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://x@localhost/x")
+    monkeypatch.setenv("REVIEW_API_TOKEN", "test-token-not-a-real-secret-0000000000")
+
+
+@pytest.mark.parametrize(
+    ("name", "writer", "pages_stem"),
+    [("Vestry Minutes 1871.pdf", _write_pdf, "vestry-minutes-1871"), ("ledger.tif", _write_tiff, "ledger")],
+)
+class TestMultiPageScans:
+    def test_one_stub_and_label_page_per_page(self, tmp_path, settings_env, name, writer, pages_stem):
+        writer(tmp_path / "images" / name)
+
+        written = calibrate.create_stubs(tmp_path)
+
+        assert [p.name for p in written] == [f"{pages_stem}.p{n}.json" for n in (1, 2, 3)]
+        for n, path in enumerate(written, start=1):
+            entry = json.loads(path.read_text("utf-8"))
+            assert entry["id"] == f"{pages_stem}.p{n}"
+            assert entry["image"] == name
+            assert entry["page"] == n
+            assert entry["status"] == "todo"
+            label = cv2.imread(str(tmp_path / "label-pages" / f"{entry['id']}.png"), cv2.IMREAD_GRAYSCALE)
+            assert entry["page_size"] == [label.shape[1], label.shape[0]]
+        # the three label pages are different pages, not page 1 three times
+        labels = [cv2.imread(str(tmp_path / "label-pages" / f"{pages_stem}.p{n}.png")) for n in (1, 2, 3)]
+        assert not np.array_equal(labels[0], labels[1]) and not np.array_equal(labels[1], labels[2])
+        # running stubs again writes nothing new
+        assert calibrate.create_stubs(tmp_path) == []
+
+    def test_run_scores_every_page_with_a_row_and_overlay_each(
+        self, tmp_path, settings_env, fake_ocr, name, writer, pages_stem
+    ):
+        writer(tmp_path / "images" / name)
+        calibrate.create_stubs(tmp_path)
+        _mark_all_done(tmp_path)
+
+        report_dir = calibrate.run(tmp_path, now=datetime(2026, 11, 3, 10, 0, tzinfo=UTC))
+
+        data = json.loads((report_dir / "report.json").read_text("utf-8"))
+        assert data["summary"]["pages_scored"] == 3
+        ids = [f"{pages_stem}.p{n}" for n in (1, 2, 3)]
+        assert [p["id"] for p in data["pages"]] == ids
+        assert [p["page"] for p in data["pages"]] == [1, 2, 3]
+        assert {p["image"] for p in data["pages"]} == {name}
+        assert all(p["cer"] == 0.0 for p in data["pages"])
+        markdown = (report_dir / "report.md").read_text("utf-8")
+        for n in (1, 2, 3):
+            assert f"| {pages_stem}.p{n} | {name} p{n} |" in markdown
+        assert sorted(p.name for p in (report_dir / "overlays").iterdir()) == [f"{i}.png" for i in ids]
+
+    def test_stub_pointing_at_a_missing_page_exits_2(
+        self, tmp_path, settings_env, fake_ocr, capsys, name, writer, pages_stem
+    ):
+        writer(tmp_path / "images" / name)
+        _write_gt(tmp_path, "p9", _done("p9", name, page=9))
+
+        assert calibrate.main(["run", "--root", str(tmp_path)]) == 2
+        err = capsys.readouterr().err
+        assert f'"page" is 9 but {name} has only 3 page(s)' in err
+
+    def test_over_limit_page_count_is_skipped_and_rejected(
+        self, tmp_path, settings_env, fake_ocr, name, writer, pages_stem
+    ):
+        writer(tmp_path / "images" / name)
+        skipped: list[str] = []
+
+        assert calibrate.create_stubs(tmp_path, max_pages=2, skipped=skipped) == []
+        assert skipped == [
+            (
+                f"{name}: 3 pages, more than the 2-page limit (MAX_PAGES_PER_DOCUMENT); "
+                "split it into smaller files"
+            )
+        ]
+        _write_gt(tmp_path, "p1", _done("p1", name, page=1))
+        with pytest.raises(GroundTruthError, match="more than the 2-page limit"):
+            calibrate.run(tmp_path, max_pages=2)
+
+
+class TestMultiPageEdgeCases:
+    def test_stubs_cli_exits_1_and_explains_an_over_limit_scan(
+        self, tmp_path, settings_env, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(calibrate, "_max_pages", lambda: 2)
+        _write_pdf(tmp_path / "images" / "big.pdf", pages=3)
+        _write_image(tmp_path / "images" / "a.png")
+
+        assert calibrate.main(["stubs", "--root", str(tmp_path)]) == 1
+        captured = capsys.readouterr()
+        assert "wrote ground_truth/a.json" in captured.out  # other scans still get stubs
+        assert "big.pdf: 3 pages, more than the 2-page limit" in captured.err
+
+    def test_corrupt_pdf_is_skipped_not_a_crash(self, tmp_path, settings_env):
+        (tmp_path / "images").mkdir(parents=True)
+        (tmp_path / "images" / "broken.pdf").write_bytes(b"%PDF-1.4\nnot really a pdf")
+        skipped: list[str] = []
+        assert calibrate.create_stubs(tmp_path, skipped=skipped) == []
+        assert len(skipped) == 1 and skipped[0].startswith("broken.pdf: could not read it")
+
+    def test_only_missing_pages_get_new_stubs(self, tmp_path, settings_env):
+        _write_pdf(tmp_path / "images" / "doc.pdf")
+        _write_gt(tmp_path, "mine", {**_done("my-label", "doc.pdf", page=2), "notes": "keep"})
+
+        written = calibrate.create_stubs(tmp_path)
+
+        assert [p.name for p in written] == ["doc.p1.json", "doc.p3.json"]
+        assert json.loads((tmp_path / "ground_truth" / "mine.json").read_text("utf-8"))["notes"] == "keep"
+
+    def test_page_must_be_a_positive_whole_number(self, tmp_path):
+        _write_image(tmp_path / "images" / "a.png")
+        _write_gt(tmp_path, "zero", _done("zero", "a.png", page=0))
+        _write_gt(tmp_path, "text", _done("text", "a.png", page="2"))
+        with pytest.raises(GroundTruthError) as excinfo:
+            load_drop_in(tmp_path)
+        assert len([p for p in excinfo.value.problems if '"page" must be a whole number' in p]) == 2
+
+    def test_single_images_are_unchanged(self, tmp_path, fake_ocr):
+        _write_image(tmp_path / "images" / "a.png")
+        entry = json.loads(calibrate.create_stubs(tmp_path)[0].read_text("utf-8"))
+        assert "page" not in entry and entry["id"] == "a"
+        _mark_all_done(tmp_path)
+        data = json.loads((calibrate.run(tmp_path) / "report.json").read_text("utf-8"))
+        assert data["pages"][0]["page"] is None
+        assert data["pages"][0]["image"] == "a.png"
+
+    def test_mixed_folder_scores_images_and_pages_together(self, tmp_path, settings_env, fake_ocr):
+        _write_image(tmp_path / "images" / "a.png")
+        _write_pdf(tmp_path / "images" / "doc.pdf", pages=2)
+        _write_tiff(tmp_path / "images" / "roll.tiff", frames=2)
+        assert len(calibrate.create_stubs(tmp_path)) == 5
+        _mark_all_done(tmp_path)
+        data = json.loads((calibrate.run(tmp_path) / "report.json").read_text("utf-8"))
+        assert [p["id"] for p in data["pages"]] == ["a", "doc.p1", "doc.p2", "roll.p1", "roll.p2"]
+
+
+def test_page_reader_renders_a_scan_once_when_read_in_order(tmp_path, settings_env, monkeypatch):
+    import ocr.pages
+    from eval.page_reader import PageReader
+
+    _write_tiff(tmp_path / "roll.tif", frames=3)
+    calls = []
+    real = ocr.pages.iter_page_images
+
+    def counting(path, **kwargs):
+        calls.append(path)
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(ocr.pages, "iter_page_images", counting)
+    with PageReader() as reader:
+        pages = [reader.read(tmp_path / "roll.tif", n) for n in (1, 2, 2, 3)]
+        assert len(calls) == 1
+        assert pages[1] is pages[2]
+        assert not np.array_equal(pages[0], pages[1])
+        reader.read(tmp_path / "roll.tif", 1)  # going back reopens the scan
+        assert len(calls) == 2
+        with pytest.raises(IndexError, match="no page 4"):
+            reader.read(tmp_path / "roll.tif", 4)
+        assert len(calls) == 2

@@ -39,6 +39,11 @@ def worst_pages(report: EvaluationReport, n: int = WORST_N) -> list[ExampleResul
     )[:n]
 
 
+def _source(r: ExampleResult) -> str:
+    """The scan a result came from, with its page for multi-page scans."""
+    return f"{r.image_name} p{r.page}" if r.page is not None else r.image_name
+
+
 def _cell(text: str) -> str:
     return text.replace("|", "\\|").replace("\n", " ")
 
@@ -168,7 +173,7 @@ def render_markdown(
         lines.append("Ranked by CER, then entity errors, then layout errors.")
         lines.append("")
         for r in worst:
-            lines.append(f"### {r.example_id} (`{r.image_name}`)")
+            lines.append(f"### {r.example_id} (`{_source(r)}`)")
             lines.append("")
             quality = f"{r.quality_score:.3f}" if r.quality_score is not None else "n/a"
             lines.append(
@@ -237,7 +242,7 @@ def render_markdown(
         labeled = str(r.layout.reference_count) if r.layout is not None else "–"
         layout_err = str(r.layout.error_count) if r.layout is not None else "–"
         lines.append(
-            f"| {_cell(r.example_id)} | {_cell(r.image_name)} | {quality} | {r.cer:.3f} | {r.wer:.3f} | "
+            f"| {_cell(r.example_id)} | {_cell(_source(r))} | {quality} | {r.cer:.3f} | {r.wer:.3f} | "
             f"{r.entity_errors} | {len(r.predicted_regions)} / {labeled} | {layout_err} |"
         )
     lines.append("")
@@ -313,6 +318,7 @@ def render_json(
             {
                 "id": r.example_id,
                 "image": r.image_name,
+                "page": r.page,
                 "quality_score": r.quality_score,
                 "page_size": list(r.page_size) if r.page_size else None,
                 "cer": r.cer,

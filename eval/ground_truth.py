@@ -54,6 +54,9 @@ class GroundTruthExample:
     # (width, height) of the preprocessed page the regions were drawn on,
     # recorded by the stub generator; used to warn when it no longer matches.
     page_size: tuple[int, int] | None = None
+    # 1-based page within a multi-page scan (PDF or multi-frame TIFF); None
+    # for a single image, which is read exactly as before multi-page support.
+    page: int | None = None
 
 
 @dataclass
@@ -95,7 +98,7 @@ def load_ground_truth(fixtures_dir: Path) -> list[GroundTruthExample]:
     return examples
 
 
-IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".pdf")
 
 
 def list_images(images_dir: Path) -> list[Path]:
@@ -104,8 +107,12 @@ def list_images(images_dir: Path) -> list[Path]:
     return sorted(p for p in images_dir.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES)
 
 
-def load_drop_in(root: Path) -> DropInSet:
+def load_drop_in(root: Path, *, max_pages: int | None = None) -> DropInSet:
     """Loads the real-scan layout: root/images/<scan>, root/ground_truth/<id>.json.
+
+    A "done" entry with a "page" number must point at a page that exists in
+    its scan; with `max_pages`, a scan with more pages than that is rejected
+    too (the same limit uploads have, MAX_PAGES_PER_DOCUMENT).
 
     Every problem across every file is collected and raised together as a
     GroundTruthError, so one run tells you everything to fix.
@@ -117,6 +124,7 @@ def load_drop_in(root: Path) -> DropInSet:
     pending: list[Path] = []
     referenced: set[str] = set()
     seen_ids: dict[str, Path] = {}
+    page_counts: dict[Path, int | str] = {}
 
     for path in sorted(gt_dir.glob("*.json")) if gt_dir.is_dir() else []:
         try:
@@ -139,6 +147,11 @@ def load_drop_in(root: Path) -> DropInSet:
         example = _parse_entry(entry, images_dir, path, problems)
         if example is None:
             continue
+        if example.page is not None and example.image_path.is_file():
+            page_problem = _check_page(example, page_counts, max_pages)
+            if page_problem:
+                problems.append(f"{path.name} [{example.id}]: {page_problem}")
+                continue
         if example.id in seen_ids:
             problems.append(f'{path.name}: id "{example.id}" is also used by {seen_ids[example.id].name}')
             continue
@@ -150,6 +163,44 @@ def load_drop_in(root: Path) -> DropInSet:
 
     unlabeled = [p for p in list_images(images_dir) if p.name not in referenced]
     return DropInSet(examples=examples, pending=pending, unlabeled_images=unlabeled)
+
+
+def scan_page_count(path: Path) -> int:
+    """Pages in a scan (1 for a single image), via ocr.pages."""
+    from ocr.pages import count_pages
+
+    return count_pages(str(path))
+
+
+def is_multi_page(path: Path) -> bool:
+    """True if the scan is addressed page by page: any PDF (even a one-page
+    one) or a TIFF with more than one frame. Single images are not."""
+    from ocr.pages import is_pdf_path
+
+    return is_pdf_path(str(path)) or scan_page_count(path) > 1
+
+
+def _check_page(
+    example: GroundTruthExample, page_counts: dict[Path, int | str], max_pages: int | None
+) -> str | None:
+    path = example.image_path
+    if path not in page_counts:
+        try:
+            page_counts[path] = scan_page_count(path)
+        except (OSError, RuntimeError, ValueError) as exc:  # corrupt PDF (PdfiumError) / TIFF
+            page_counts[path] = f"could not read {path.name} ({exc.__class__.__name__}: {exc})"
+    count = page_counts[path]
+    if isinstance(count, str):
+        return count
+    if max_pages is not None and count > max_pages:
+        return (
+            f"{path.name} has {count} pages, more than the {max_pages}-page limit "
+            "(MAX_PAGES_PER_DOCUMENT); split it into smaller files"
+        )
+    assert example.page is not None
+    if example.page > count:
+        return f'"page" is {example.page} but {path.name} has only {count} page(s)'
+    return None
 
 
 def _parse_entry(
@@ -224,6 +275,14 @@ def _parse_entry(
     if isinstance(raw_size, list) and len(raw_size) == 2 and all(isinstance(v, int) for v in raw_size):
         page_size = (raw_size[0], raw_size[1])
 
+    page: int | None = None
+    raw_page = entry.get("page")
+    if raw_page is not None:
+        if isinstance(raw_page, int) and not isinstance(raw_page, bool) and raw_page >= 1:
+            page = raw_page
+        else:
+            problems.append(f'{where}: "page" must be a whole number from 1, got {raw_page!r}')
+
     if before != len(problems):
         return None
     return GroundTruthExample(
@@ -235,4 +294,5 @@ def _parse_entry(
         notes=entry.get("notes", "") if isinstance(entry.get("notes"), str) else "",
         source_file=source,
         page_size=page_size,
+        page=page,
     )
