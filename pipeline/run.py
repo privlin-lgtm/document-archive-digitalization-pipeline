@@ -11,10 +11,12 @@ their "resumability" is just "skip if already persisted" without needing any
 extra state — rerunning a region that legitimately produced zero entities is
 harmless (it produces zero entities again, no duplicates).
 
-This module works one page per document (page_number=1) — nothing upstream
-(ingestion.upload, this module) splits a multi-page source (e.g. a
-multi-page TIFF/PDF) into separate pages yet; that's a real gap for a future
-stage, not something this pipeline wiring invents a design for.
+Multi-page sources are supported: a multi-frame TIFF or a PDF becomes one
+`pages` row per page (see ocr.pages, which rasterises PDFs with pypdfium2).
+Pages are processed in order and streamed one at a time, so a long PDF
+never sits in memory as a list of rendered bitmaps. Resume works per page:
+a crash on page 3 of 5 leaves pages 1-2 (and any regions of page 3 already
+OCR'd) persisted, and the retry skips straight past that work.
 
 See worker.run_ocr_job for the Celery entry point (job-level retry/backoff
 for transient infrastructure failures) and pipeline.smoke_test-style usage
@@ -33,12 +35,13 @@ import cv2
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
+from config import get_settings
 from extraction.anomalies import detect_all_anomalies
 from extraction.entities import ExtractedEntity, extract_entities
 from ocr.engine import OCRResult, OCRRouter, TesseractBackend, TrOCRBackend
 from ocr.layout import BBox, detect_regions
 from ocr.layout import Region as LayoutRegion
-from ocr.pages import load_page_images
+from ocr.pages import count_pages, iter_page_images
 from ocr.preprocess import preprocess
 from review_api.metrics import inc as inc_metric
 from storage.db import SessionLocal
@@ -262,7 +265,7 @@ def _flag_empty_layout(session, document: Document, page: Page) -> None:
 def _ensure_page_and_regions(
     session, document: Document, image: np.ndarray, page_number: int = 1
 ) -> tuple[Page, list[DBRegion], np.ndarray]:
-    """Load this document's single page/regions if the pipeline already got
+    """Load this page's regions if the pipeline already got
     this far on a prior attempt, otherwise preprocess + detect + persist
     them now. Bbox coordinates are only valid against the *preprocessed*
     image (deskew/auto_crop change dimensions), so callers must crop from
@@ -550,11 +553,19 @@ def run_pipeline(document_id: str) -> None:
         lock_id = document.id  # only set once actually held, so `finally` doesn't unlock a lock we never acquired
 
         try:
-            page_images = load_page_images(document.raw_image_path)
+            page_count = count_pages(document.raw_image_path)
         except FileNotFoundError:
-            page_images = []
-        if not page_images:
+            page_count = 0
+        except Exception as exc:  # e.g. a PDF that PDFium can't open
+            raise ValueError(f"could not read document at {document.raw_image_path!r}: {exc}") from exc
+        if page_count < 1:
             raise ValueError(f"could not read image at {document.raw_image_path!r}")
+        max_pages = get_settings().max_pages_per_document
+        if page_count > max_pages:
+            # Upload validation already enforces this; checked again here so
+            # a file that predates the limit (or bypassed the API) can't
+            # queue unbounded OCR work.
+            raise ValueError(f"document has {page_count} pages, over the {max_pages}-page limit")
 
         document.status = DocumentStatus.preprocessing
         session.commit()
@@ -563,7 +574,9 @@ def run_pipeline(document_id: str) -> None:
         total_flags = 0
         any_partial = False
 
-        for page_number, image in enumerate(page_images, start=1):
+        pages_seen = 0
+        for page_number, image in enumerate(iter_page_images(document.raw_image_path), start=1):
+            pages_seen = page_number
             with _stage_timer(document_id, f"preprocess_and_layout_p{page_number}"):
                 page, db_regions, preprocessed_image = _ensure_page_and_regions(
                     session, document, image, page_number
@@ -598,6 +611,9 @@ def run_pipeline(document_id: str) -> None:
                     entities_by_region_idx, db_entities_by_region_idx,
                 )
 
+        if pages_seen == 0:
+            raise ValueError(f"could not read image at {document.raw_image_path!r}")
+
         document.status = DocumentStatus.ocr_partial if any_partial else DocumentStatus.ocr_done
         session.commit()
         document.status = DocumentStatus.indexed
@@ -607,8 +623,8 @@ def run_pipeline(document_id: str) -> None:
         inc_metric("pipeline_complete")
 
         logger.info(
-            "pipeline_complete document_id=%s status=%s regions=%d flags=%d",
-            document_id, document.status.value, total_regions, total_flags,
+            "pipeline_complete document_id=%s status=%s pages=%d regions=%d flags=%d",
+            document_id, document.status.value, pages_seen, total_regions, total_flags,
         )
     finally:
         if lock_id is not None:

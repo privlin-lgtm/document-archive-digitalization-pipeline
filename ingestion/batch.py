@@ -1,4 +1,5 @@
-"""Batch ingestion CLI: point at a directory of scanned images and enqueue
+"""Batch ingestion CLI: point at a directory of scanned images (or multi-page
+TIFFs/PDFs) and enqueue
 each for the async pipeline (see pipeline.run / worker.run_ocr_job).
 Archives are typically received as a folder of hundreds of scans dropped in
 at once (a completed digitization run, a delivered hard drive), not one file
@@ -29,14 +30,16 @@ from pathlib import Path
 
 from config import get_settings
 from ingestion.upload import UnsafeFilenameError, UploadTooLargeError, save_raw_image
-from ingestion.validate import InvalidImageError, decode_and_check_image
+from ingestion.validate import InvalidImageError, check_document
 from storage.db import SessionLocal
 from storage.models import Document, DocumentStatus
 from worker import run_ocr_job
 
 logger = logging.getLogger(__name__)
 
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
+# Despite the name, includes PDFs: each multi-page PDF/TIFF becomes one
+# document with one `pages` row per page.
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".pdf"}
 
 DEFAULT_CONCURRENCY = 4
 DEFAULT_POLL_INTERVAL_SECONDS = 10.0
@@ -54,7 +57,7 @@ def ingest_one(path: Path) -> uuid.UUID | None:
     document_id = uuid.uuid4()
     content = path.read_bytes()
     try:
-        decode_and_check_image(content)
+        check_document(content)
         raw_image_path = save_raw_image(document_id, path.name, content)
     except (UnsafeFilenameError, UploadTooLargeError, InvalidImageError):
         logger.exception("skipping %s: could not be saved", path)

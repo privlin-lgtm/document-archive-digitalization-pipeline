@@ -1,3 +1,4 @@
+import io
 import uuid
 from types import SimpleNamespace
 
@@ -54,6 +55,8 @@ def api(sqlite_session_factory, tmp_path, monkeypatch):
         storage_local_path=str(tmp_path),
         max_upload_size_bytes=50 * 1024 * 1024,
         max_image_pixels=40_000_000,
+        max_pages_per_document=200,
+        pdf_render_dpi=300,
         max_files_per_upload=get_settings().max_files_per_upload,
     )
     monkeypatch.setattr("ingestion.upload.get_settings", lambda: fake_settings)
@@ -698,3 +701,76 @@ class TestSearchEndpoint:
     def test_missing_query_param_is_422(self, pg_client):
         response = pg_client.get("/search", headers=auth_headers())
         assert response.status_code == 422
+
+
+class TestMultiPageUploads:
+    """PDF and multi-page TIFF uploads (see tests/test_multipage.py for the
+    page splitter and pipeline side)."""
+
+    @staticmethod
+    def _pdf(page_count: int) -> bytes:
+        from PIL import Image
+
+        frames = [Image.new("RGB", (200, 100), "white") for _ in range(page_count)]
+        buf = io.BytesIO()
+        frames[0].save(buf, "PDF", save_all=True, append_images=frames[1:])
+        return buf.getvalue()
+
+    def test_a_multi_page_pdf_upload_is_accepted_and_enqueued(self, api):
+        client, session_factory, _tmp, enqueued = api
+        response = client.post(
+            "/documents",
+            headers=auth_headers(),
+            files={"files": ("deed.pdf", self._pdf(3), "application/pdf")},
+        )
+        assert response.status_code == 201, response.text
+        body = response.json()[0]
+        assert body["filename"] == "deed.pdf"
+        assert enqueued == [body["id"]]
+        document = session_factory().get(Document, uuid.UUID(body["id"]))
+        assert document.raw_image_path.endswith("deed.pdf")
+
+    def test_a_pdf_over_the_page_limit_is_rejected(self, api, monkeypatch):
+        client, session_factory, *_ = api
+        monkeypatch.setattr("ingestion.validate.get_settings", lambda: SimpleNamespace(
+            max_image_pixels=40_000_000, max_pages_per_document=2, pdf_render_dpi=300,
+        ))
+        response = client.post(
+            "/documents",
+            headers=auth_headers(),
+            files={"files": ("deed.pdf", self._pdf(3), "application/pdf")},
+        )
+        assert response.status_code == 400
+        assert "over the 2-page limit" in response.json()["detail"]
+        assert session_factory().query(Document).count() == 0
+
+    def test_image_endpoint_serves_each_pages_own_processed_image(self, api):
+        client, session_factory, tmp_path, _ = api
+        raw = tmp_path / "doc_deed.pdf"
+        raw.write_bytes(self._pdf(2))
+        page2_png = tmp_path / "page2.png"
+        page2_png.write_bytes(make_png_bytes(30, 10))
+
+        session = session_factory()
+        document = Document(
+            id=uuid.uuid4(), filename="deed.pdf", raw_image_path=str(raw), status=DocumentStatus.ready
+        )
+        session.add(document)
+        session.flush()
+        session.add(Page(document_id=document.id, page_number=1))
+        session.add(Page(document_id=document.id, page_number=2, processed_image_path=str(page2_png)))
+        session.commit()
+        document_id = str(document.id)
+        session.close()
+
+        page2 = client.get(f"/documents/{document_id}/image?page=2", headers=auth_headers())
+        assert page2.status_code == 200
+        assert page2.content == page2_png.read_bytes()
+
+        # Page 1 isn't rendered yet and the raw file is a PDF: 404, not PDF
+        # bytes served to an <img>.
+        page1 = client.get(f"/documents/{document_id}/image?page=1", headers=auth_headers())
+        assert page1.status_code == 404
+
+        page3 = client.get(f"/documents/{document_id}/image?page=3", headers=auth_headers())
+        assert page3.status_code == 404

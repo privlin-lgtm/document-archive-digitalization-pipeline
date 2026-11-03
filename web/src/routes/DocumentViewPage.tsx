@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { Alert, Badge, Button, Group, Kbd, Loader, Stack, Text } from "@mantine/core";
 import { useHotkeys } from "@mantine/hooks";
@@ -8,6 +8,7 @@ import { ImageCanvas, type ImageCanvasHandle } from "../components/ImageCanvas";
 import { EntityPanel } from "../components/EntityPanel";
 import { FlagBadge } from "../components/FlagBadge";
 import { SplitPane } from "../components/SplitPane";
+import { PageSwitcher } from "../components/PageSwitcher";
 import { useSelectionStore } from "../state/selection";
 import { SEVERITY_RANK } from "../utils/confidence";
 import type { FlagType, ReviewFlagOut } from "../api/types";
@@ -64,7 +65,26 @@ export function DocumentViewPage() {
   const setEditingEntityId = useSelectionStore((s) => s.setEditingEntityId);
   const clear = useSelectionStore((s) => s.clear);
 
-  const allRegions = useMemo(() => document?.pages.flatMap((page) => page.regions) ?? [], [document]);
+  // Keyed by document so navigating to another document starts on page 1
+  // without a reset effect.
+  const [pageState, setPageState] = useState<{ documentId?: string; page: number }>({ page: 1 });
+  const pageNumber = pageState.documentId === documentId ? pageState.page : 1;
+
+  const sortedPages = useMemo(
+    () => [...(document?.pages ?? [])].sort((a, b) => a.page_number - b.page_number),
+    [document],
+  );
+  const currentPage = sortedPages.find((page) => page.page_number === pageNumber) ?? sortedPages[0];
+  const pageNumberByRegionId = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const page of sortedPages) for (const region of page.regions) map.set(region.id, page.page_number);
+    return map;
+  }, [sortedPages]);
+  const pageNumberByPageId = useMemo(
+    () => new Map(sortedPages.map((page) => [page.id, page.page_number])),
+    [sortedPages],
+  );
+  const allRegions = useMemo(() => sortedPages.flatMap((page) => page.regions), [sortedPages]);
   const openFlags = useMemo(
     () =>
       (document?.flags ?? [])
@@ -94,6 +114,15 @@ export function DocumentViewPage() {
     return ids;
   }, [allRegions]);
 
+  const openFlagsByPage = useMemo(() => {
+    const map = new Map<number, number>();
+    for (const flag of openFlags) {
+      const number = flag.page_id ? pageNumberByPageId.get(flag.page_id) : undefined;
+      if (number != null) map.set(number, (map.get(number) ?? 0) + 1);
+    }
+    return map;
+  }, [openFlags, pageNumberByPageId]);
+
   const currentFlag: ReviewFlagOut | undefined =
     openFlags.find((flag) => flag.id === selectedFlagId) ?? openFlags[0];
   const currentFlagIndex = currentFlag ? openFlags.findIndex((flag) => flag.id === currentFlag.id) : -1;
@@ -102,6 +131,31 @@ export function DocumentViewPage() {
     initializedDocumentId.current = null;
     return () => clear();
   }, [clear, documentId]);
+
+  // Follow the selection across pages: picking a flag or an entity on
+  // another page (from the flag bar, keyboard or entity panel) shows that
+  // page, since the canvas only draws the current page's regions.
+  useEffect(
+    () =>
+      useSelectionStore.subscribe((state, prev) => {
+        if (state.selectedRegionId === prev.selectedRegionId && state.selectedFlagId === prev.selectedFlagId) return;
+        const regionPage = state.selectedRegionId ? pageNumberByRegionId.get(state.selectedRegionId) : undefined;
+        const flag = state.selectedFlagId ? document?.flags.find((f) => f.id === state.selectedFlagId) : undefined;
+        const flagPage = flag?.page_id ? pageNumberByPageId.get(flag.page_id) : undefined;
+        const target = regionPage ?? flagPage;
+        if (target != null) setPageState({ documentId, page: target });
+      }),
+    [document, documentId, pageNumberByPageId, pageNumberByRegionId],
+  );
+
+  function goToPage(next: number) {
+    if (sortedPages.length === 0) return;
+    const clamped = Math.min(sortedPages.length, Math.max(1, next));
+    if (clamped === (currentPage?.page_number ?? 1)) return;
+    // Drop a selection that lives on the page being left.
+    clear();
+    setPageState({ documentId, page: sortedPages[clamped - 1].page_number });
+  }
 
   useEffect(() => {
     if (!document || initializedDocumentId.current === document.id) return;
@@ -162,6 +216,8 @@ export function DocumentViewPage() {
     ["+", () => canvasRef.current?.zoomBy(1.15)],
     ["-", () => canvasRef.current?.zoomBy(1 / 1.15)],
     ["0", () => canvasRef.current?.fit()],
+    ["PageDown", () => goToPage((currentPage?.page_number ?? 1) + 1), { preventDefault: true }],
+    ["PageUp", () => goToPage((currentPage?.page_number ?? 1) - 1), { preventDefault: true }],
   ]);
 
   if (isLoading) {
@@ -198,6 +254,12 @@ export function DocumentViewPage() {
           </Text>
         </Stack>
         <Group gap="xs" wrap="nowrap">
+          <PageSwitcher
+            page={currentPage?.page_number ?? 1}
+            pageCount={sortedPages.length}
+            onChange={goToPage}
+            openFlagsByPage={openFlagsByPage}
+          />
           <Badge variant="light">{document.status}</Badge>
           {document.status === "enqueue_failed" || document.status === "error" ? (
             <Button size="xs" variant="light" loading={reprocess.isPending} onClick={() => reprocess.mutate()}>
@@ -272,7 +334,8 @@ export function DocumentViewPage() {
           <ImageCanvas
             ref={canvasRef}
             documentId={document.id}
-            regions={allRegions}
+            page={currentPage?.page_number ?? 1}
+            regions={currentPage?.regions ?? []}
             flagsByRegionId={flagsByRegionId}
             correctedRegionIds={correctedRegionIds}
           />

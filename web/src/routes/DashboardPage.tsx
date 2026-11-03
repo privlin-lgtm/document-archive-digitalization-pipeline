@@ -40,7 +40,7 @@ export function DashboardPage() {
         <Text fw={700} size="lg">
           Dashboard
         </Text>
-        <FileButton resetRef={resetRef} onChange={handleFiles} accept="image/*" multiple>
+        <FileButton resetRef={resetRef} onChange={handleFiles} accept="image/*,application/pdf,.pdf,.tif,.tiff" multiple>
           {(props) => (
             <Button {...props} leftSection={<IconUpload size={16} />} loading={uploadDocuments.isPending}>
               Upload scans

@@ -14,6 +14,8 @@ def fake_settings(**overrides) -> SimpleNamespace:
         "storage_local_path": "",
         "max_upload_size_bytes": 50 * 1024 * 1024,
         "max_image_pixels": 40_000_000,
+        "max_pages_per_document": 200,
+        "pdf_render_dpi": 300,
     }
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -37,12 +39,12 @@ def batch_env(monkeypatch, sqlite_session_factory, tmp_path):
 
 class TestDiscoverImages:
     def test_finds_only_known_image_extensions_sorted(self, tmp_path):
-        for name in ("b.png", "a.jpg", "notes.txt", "c.TIFF", "readme.md"):
+        for name in ("b.png", "a.jpg", "notes.txt", "c.TIFF", "readme.md", "d.PDF"):
             (tmp_path / name).write_bytes(b"x")
 
         found = batch._discover_images(tmp_path)
 
-        assert [p.name for p in found] == ["a.jpg", "b.png", "c.TIFF"]
+        assert [p.name for p in found] == ["a.jpg", "b.png", "c.TIFF", "d.PDF"]
 
     def test_ignores_subdirectories(self, tmp_path):
         (tmp_path / "sub").mkdir()
@@ -55,6 +57,20 @@ class TestDiscoverImages:
 
 
 class TestIngestOne:
+    def test_a_multi_page_pdf_is_ingested_as_one_document(self, batch_env, tmp_path):
+        from PIL import Image
+
+        session_factory, enqueued = batch_env
+        pdf_path = tmp_path / "deed.pdf"
+        frames = [Image.new("RGB", (200, 100), "white") for _ in range(3)]
+        frames[0].save(pdf_path, "PDF", save_all=True, append_images=frames[1:])
+
+        document_id = batch.ingest_one(pdf_path)
+
+        assert document_id is not None
+        assert enqueued == [str(document_id)]
+        assert session_factory().get(Document, document_id).filename == "deed.pdf"
+
     def test_creates_document_row_and_enqueues_pipeline_job(self, batch_env, tmp_path):
         session_factory, enqueued = batch_env
         image_path = tmp_path / "scan.png"
