@@ -13,11 +13,12 @@ Usage:
 from __future__ import annotations
 
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 from eval.ground_truth import GroundTruthExample, load_ground_truth
 from eval.layout_metrics import BBox, LayoutScore, score_layout
@@ -56,6 +57,8 @@ class ExampleResult:
     # (width, height) of the preprocessed page detect_regions ran on
     page_size: tuple[int, int] | None = None
     image_name: str = ""
+    # 1-based page within a multi-page scan; None for a single image
+    page: int | None = None
 
     @property
     def entity_scores(self) -> dict[str, EntityPRF]:
@@ -86,10 +89,11 @@ class EvaluationReport:
         return sum(r.wer for r in self.results) / len(self.results) if self.results else 0.0
 
 
-def _run_example(example: GroundTruthExample) -> ExampleResult:
-    image = cv2.imread(str(example.image_path))
+def _run_example(example: GroundTruthExample, image: np.ndarray | None = None) -> ExampleResult:
     if image is None:
-        raise FileNotFoundError(f"could not read fixture image: {example.image_path}")
+        image = cv2.imread(str(example.image_path))
+        if image is None:
+            raise FileNotFoundError(f"could not read fixture image: {example.image_path}")
 
     preprocessed = preprocess(image)
     regions = detect_regions(preprocessed.image)
@@ -130,6 +134,7 @@ def _run_example(example: GroundTruthExample) -> ExampleResult:
         quality_score=preprocessed.quality_score,
         page_size=(page_w, page_h),
         image_name=example.image_path.name,
+        page=example.page,
     )
 
 
@@ -137,8 +142,17 @@ def run_evaluation(fixtures_dir: Path = DEFAULT_FIXTURES_DIR) -> EvaluationRepor
     return evaluate_examples(load_ground_truth(fixtures_dir))
 
 
-def evaluate_examples(examples: Sequence[GroundTruthExample]) -> EvaluationReport:
-    results = [_run_example(example) for example in examples]
+def evaluate_examples(
+    examples: Sequence[GroundTruthExample],
+    *,
+    read_image: Callable[[GroundTruthExample], np.ndarray] | None = None,
+) -> EvaluationReport:
+    """Scores each example. `read_image` supplies the page image (the
+    calibration harness passes one that renders pages of PDFs and
+    multi-frame TIFFs); without it each image file is read with cv2.imread."""
+    results = [
+        _run_example(example, read_image(example) if read_image else None) for example in examples
+    ]
 
     all_predicted = [pair for r in results for pair in r.predicted_entities]
     all_reference = [pair for r in results for pair in r.reference_entities]

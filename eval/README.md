@@ -24,8 +24,11 @@ docker compose run --rm app python -m eval.report
 ```
 
 For real scans, use the drop-in folder and `python -m eval.calibrate` instead:
-one JSON file per scan, a stub generator, layout-region scoring, and dated
-Markdown/JSON reports. See [`real/README.md`](real/README.md).
+one JSON file per page, a stub generator, layout-region scoring, and dated
+Markdown/JSON reports. Scans can be single images, multi-page PDFs or
+multi-frame TIFFs; pages are split with `ocr.pages`, the same code the
+pipeline uses, and each page is scored as its own row. See
+[`real/README.md`](real/README.md).
 
 ## Metrics
 
