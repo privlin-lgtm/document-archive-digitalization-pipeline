@@ -1,0 +1,18 @@
+{
+  "id": "parish-ledger-1872-p014",
+  "image": "parish-ledger-1872-p014.png",
+  "status": "todo",
+  "text": "",
+  "entities": [
+    {"type": "person", "value": "John A. Smith"},
+    {"type": "location", "value": "Mumbai"},
+    {"type": "date", "value": "1897-03-03"},
+    {"type": "amount", "value": "USD 128.50"}
+  ],
+  "regions": [
+    {"type": "paragraph", "bbox": [120, 210, 1640, 380]},
+    {"type": "signature", "bbox": [1100, 2050, 520, 140]}
+  ],
+  "notes": "",
+  "page_size": [2480, 3508]
+}

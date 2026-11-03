@@ -8,3 +8,10 @@ data/
 .ruff_cache/
 backups/*.sql.gz
 backups/*.tar.gz
+
+# Real-scan calibration folder: client scans and everything derived from
+# them (label pages, overlays, reports) must never be committed. Only the
+# instructions and the blank template are tracked. See eval/real/README.md.
+eval/real/*
+!eval/real/README.md
+!eval/real/TEMPLATE.json

@@ -23,6 +23,10 @@ locally, run it in the project's Docker image (which does):
 docker compose run --rm app python -m eval.report
 ```
 
+For real scans, use the drop-in folder and `python -m eval.calibrate` instead:
+one JSON file per scan, a stub generator, layout-region scoring, and dated
+Markdown/JSON reports. See [`real/README.md`](real/README.md).
+
 ## Metrics
 
 - **CER** (character error rate) / **WER** (word error rate): Levenshtein
@@ -53,9 +57,15 @@ image with its correct text and correct entities:
     {"type": "location", "value": "Mumbai"},
     {"type": "date", "value": "1897-03-03"},
     {"type": "amount", "value": "USD 128.50"}
+  ],
+  "regions": [
+    {"type": "paragraph", "bbox": [38, 116, 493, 50]}
   ]
 }
 ```
+
+`regions` is optional: when present, layout segmentation is scored too
+(see `layout_metrics.py` and `real/README.md`).
 
 `image` is relative to `fixtures/images/`. `entities[].value` must match
 `extraction.entities`' own normalization conventions exactly, since scoring

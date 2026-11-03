@@ -13,3 +13,7 @@ document-archive-pipeline-prompts.md
 web/node_modules/
 web/dist/
 web/.env
+
+# Real client scans (see eval/real/README.md) must never be baked into an
+# image; the `eval` Compose service bind-mounts the folder at run time.
+eval/real/

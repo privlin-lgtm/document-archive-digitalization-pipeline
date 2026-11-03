@@ -115,6 +115,19 @@ services:
           cpus: "4"
           memory: 4g
 
+  # Real-scan calibration (eval/real/README.md). Only starts when asked for:
+  #   docker compose run --rm --build eval
+  # Profile-gated so `docker compose up` never starts it. No database, no
+  # .env and no network: it reads scans from the bind-mounted drop-in folder
+  # and writes reports back into it, nothing else.
+  eval:
+    build: .
+    profiles: ["eval"]
+    network_mode: none
+    command: ["python", "-m", "eval.calibrate", "run"]
+    volumes:
+      - ./eval/real:/srv/eval/real
+
   web:
     build: ./web
     restart: unless-stopped

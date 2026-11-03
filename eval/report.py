@@ -13,12 +13,14 @@ Usage:
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
 
 from eval.ground_truth import GroundTruthExample, load_ground_truth
+from eval.layout_metrics import BBox, LayoutScore, score_layout
 from eval.metrics import EntityPRF, character_error_rate, score_entities, word_error_rate
 from extraction.entities import extract_entities
 from ocr.engine import OCRRouter, TesseractBackend, TrOCRBackend
@@ -46,12 +48,34 @@ class ExampleResult:
     wer: float
     predicted_entities: list[tuple[str, str]]
     reference_entities: list[tuple[str, str]]
+    # (region_type, bbox) as detect_regions returned them, in reading order
+    predicted_regions: list[tuple[str, BBox]] = field(default_factory=list)
+    # None when the ground truth has no region labels for this page
+    layout: LayoutScore | None = None
+    quality_score: float | None = None
+    # (width, height) of the preprocessed page detect_regions ran on
+    page_size: tuple[int, int] | None = None
+    image_name: str = ""
+
+    @property
+    def entity_scores(self) -> dict[str, EntityPRF]:
+        return score_entities(self.predicted_entities, self.reference_entities)
+
+    @property
+    def entity_errors(self) -> int:
+        return sum(s.false_positives + s.false_negatives for s in self.entity_scores.values())
 
 
 @dataclass
 class EvaluationReport:
     results: list[ExampleResult]
     entity_scores: dict[str, EntityPRF]
+
+    @property
+    def layout(self) -> LayoutScore | None:
+        """Combined layout score over the pages that have region labels."""
+        scored = [r.layout for r in self.results if r.layout is not None]
+        return LayoutScore.combine(scored) if scored else None
 
     @property
     def mean_cer(self) -> float:
@@ -69,6 +93,7 @@ def _run_example(example: GroundTruthExample) -> ExampleResult:
 
     preprocessed = preprocess(image)
     regions = detect_regions(preprocessed.image)
+    page_h, page_w = preprocessed.image.shape[:2]
     router = _get_router()
 
     texts: list[str] = []
@@ -87,6 +112,10 @@ def _run_example(example: GroundTruthExample) -> ExampleResult:
 
     predicted_text = "\n".join(texts)
     reference_entities = [(e.entity_type, e.value) for e in example.entities]
+    predicted_regions: list[tuple[str, BBox]] = [(r.region_type, r.bbox) for r in regions]
+    layout = None
+    if example.regions is not None:
+        layout = score_layout(predicted_regions, [(r.region_type, r.bbox) for r in example.regions])
 
     return ExampleResult(
         example_id=example.id,
@@ -96,11 +125,19 @@ def _run_example(example: GroundTruthExample) -> ExampleResult:
         wer=word_error_rate(predicted_text, example.text),
         predicted_entities=predicted_entities,
         reference_entities=reference_entities,
+        predicted_regions=predicted_regions,
+        layout=layout,
+        quality_score=preprocessed.quality_score,
+        page_size=(page_w, page_h),
+        image_name=example.image_path.name,
     )
 
 
 def run_evaluation(fixtures_dir: Path = DEFAULT_FIXTURES_DIR) -> EvaluationReport:
-    examples = load_ground_truth(fixtures_dir)
+    return evaluate_examples(load_ground_truth(fixtures_dir))
+
+
+def evaluate_examples(examples: Sequence[GroundTruthExample]) -> EvaluationReport:
     results = [_run_example(example) for example in examples]
 
     all_predicted = [pair for r in results for pair in r.predicted_entities]
